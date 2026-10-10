@@ -47,7 +47,7 @@
 
 - **目标：** 无对应 Java 类。
 - **实施：** 这是旧 WebSocket 房间路由实现，当前主入口使用的是 `src/routers/room-router.ts`。再次确认构建入口和动态加载无引用后标记废弃，避免把旧协议误认为现网功能。
-- **验收：** 当前 HTTP 房间流程和 PeerJS 联机均由 F24/P7 覆盖；迁移清单中不额外创建一个 WebSocket 对局网关。
+- **验收：** 当前 HTTP 房间流程和 PeerJS 联机均由 F25/P7 覆盖；迁移清单中不额外创建一个 WebSocket 对局网关。
 
 ### F06 `src/config/global.ts`
 
@@ -65,7 +65,7 @@
 
 - **目标：** `audit/AdminAuditRepository.java`、`audit/AdminAuditService.java`。
 - **实施：** 保留查看、生成、重置、吊销 Key 与重置上传计数的 action 值，以及 adminId、targetUserId、detail。Key 变更和审计写入同一 DB 事务；查询 Key 的审计单独记录，不在 detail 中重复保存明文 Key。
-- **验收：** 各操作有且仅有预期日志，列表查询按原 page/search 记录上下文；用户删除后审计仍保留。依赖 F13、F26。
+- **验收：** 各操作有且仅有预期日志，列表查询按原 page/search 记录上下文；用户删除后审计仍保留。依赖 F18、F27。
 
 ### F08 `src/db/api/game-map.ts`
 
@@ -73,9 +73,9 @@
 
 - **目标：** `map/GameMapRepository.java`、`map/MapQueryService.java`、`map/MapReviewService.java`、`map/MapOwnershipService.java`。
 - **实施：** 显式 SQL 保留公开列表仅 published、官方/管理员创作者优先、version 排序；后台分页、状态筛选及 creator 字段使用 DTO。创作者配额计数包含所有状态。
-- **状态事务：** 投稿设置 pending 文件与 reviewing；批准原子地提升发布文件、清空 pending、递增整数发布版本并追加非空 changelog；拒绝原因与状态同事务；下架/恢复不隐式改 `inUse`。绑定创作者、删除用户时保留 published 并解绑，其余状态删除。
+- **状态事务：** 投稿设置 pending 文件与 reviewing；批准原子地提升发布文件、清空 pending、递增整数发布版本并追加非空 changelog；拒绝原因与状态同事务；下架/恢复不隐式改 `inuse`。绑定创作者、删除用户时保留 published 并解绑，其余状态删除。
 - **注意：** `pendingVersion` 是字符串内容版本，`version` 是发布计数。`publishExistingInUseMaps` 移为受控一次性修正，不能让重启重新发布被下架/拒绝的地图；无调用的 `getActiveMapKeyOwnerMapCount` 不单独迁移。
-- **验收：** 全状态转换表、越权、重复审核、旧文件保留、分页排序通过；同一地图并发审核不能重复递增或删掉新文件。数据库提交后的旧文件删除由 F37 接管。
+- **验收：** 全状态转换表、越权、重复审核、旧文件保留、分页排序通过；同一地图并发审核不能重复递增或删掉新文件。数据库提交后的旧文件删除由 F38 接管。
 
 ### F09 `src/db/api/game-record.ts`
 
@@ -83,7 +83,7 @@
 
 - **目标：** `room/GameRecordRepository.java`、`room/RoomExpiryService.java`。
 - **实施：** 写入 roomId/name、毫秒 duration、mapId/mapName。记录目前来自房间 grace 结束后的过期处理，并不等于游戏完成结算；显式删除房间当前不写记录，基础迁移保持此口径。
-- **验收：** 同房间过期扫描并发只触发一次写入；DB 失败保留可重试状态并告警，不能像未等待 Promise 一样丢弃失败。基础内存版只承诺本进程生命周期内去重，重启后的可靠补写属于可选持久化任务。依赖 F15、F24。
+- **验收：** 同房间过期扫描并发只触发一次写入；DB 失败保留可重试状态并告警，不能像未等待 Promise 一样丢弃失败。基础内存版只承诺本进程生命周期内去重，重启后的可靠补写属于可选持久化任务。依赖 F15、F25。
 
 ### F10 `src/db/api/map-key.ts`
 
@@ -101,7 +101,7 @@
 - **目标：** `map/UploadCounterRepository.java`、`map/UploadCounterService.java`。
 - **实施：** 保留按配置业务时区日期清零、查询当日次数、成功投稿后递增、管理员重置。使用 SQL 原子更新/行锁避免读改写覆盖；文件上传期间不长期持有用户行锁。
 - **边界：** 当前日限制是软限制，并发请求可能一起通过预检。基础迁移维持此产品语义，同时确保已成功上传的计数不丢；如要求严格上限，需新增预留/释放额度机制，单独评估，不把原子 increment 误称为严格限额。
-- **验收：** 跨日、时区、重置与并发成功请求计数正确；失败不递增；计数写入失败有明确可观测记录。依赖 F17、F23。
+- **验收：** 跨日、时区、重置与并发成功请求计数正确；失败不递增；计数写入失败有明确可观测记录。依赖 F17、F24。
 
 ### F12 `src/db/api/user.ts`
 
@@ -127,7 +127,7 @@
 源文件：[apps/server/src/db/entities/GameMap.ts](../../apps/server/src/db/entities/GameMap.ts)。状态：[ ] 待迁移映射。
 
 - **目标：** `map/GameMapRow.java`、`map/MapStatus.java`、`map/MapChangelogEntry.java`。
-- **实施：** 保留 UUID、描述、作者、封面、发布/候选地图和源图 URL/hash、creatorId、inUse、审核状态/原因、两个不同版本字段及 JSON changelog。creator 删除时 SET NULL，字段长度/索引按真实 DDL。
+- **实施：** 保留 UUID、描述、作者、封面、发布/候选地图和源图 URL/hash、creatorId、inuse、审核状态/原因、两个不同版本字段及 JSON changelog。creator 删除时 SET NULL，字段长度/索引按真实 DDL。
 - **验收：** null/空字符串、旧无 creator 地图、JSON null/空数组/已有记录均能读取；DTO 不直接序列化关联 User；原 URL 不重写。依赖 F08/F13。
 
 ### F15 `src/db/entities/GameRecord.ts`
@@ -150,7 +150,7 @@
 
 源文件：[apps/server/src/db/entities/User.ts](../../apps/server/src/db/entities/User.ts)。状态：[ ] 待迁移映射。
 
-- **目标：** `user/UserRow.java`、`user/UserProfileResponse.java`、`user/AdminUserResponse.java`、`user/AdminBootstrapService.java`。
+- **目标：** `user/UserRow.java`、`user/UserProfileResponse.java`、`user/AdminuserResponse.java`、`user/AdminBootstrapService.java`。
 - **实施：** 源码 `id` 和 `useraccount` 同为主键，不能假设账号单列唯一；保留原哈希、salt、头像、颜色、角色、在线信息、所有 nullable 限制、上传日计数以及时间列映射。检查已有重复账号后再决定是否新增唯一索引。
 - **初始化：** 原 BeforeInsert 以“第一位用户”授予管理员且存在并发竞争。新空库采用显式初始化管理员任务；已有库不执行首用户自动提权。该引导行为变化记入 C08。
 - **验收：** 原密码无需重设可登录；角色/限制的 null 与 false 不混淆；任何响应 DTO 无 password/salt；同时注册不产生多个意外管理员。
@@ -212,7 +212,7 @@
 - **目标：** `map/MapPublicController.java`、`map/MapAdminController.java`、`map/CreatorMapController.java`、`map/MapUploadService.java`、`map/MapReviewService.java` 及请求 DTO。
 - **实施：** 覆盖全部 12 个接口。公开查询、管理员操作、X-Api-Key 投稿分开授权；保留 `game-map`、`source-map`、`cover-image` multipart 名称，以及 `server-map-id`/`serverMapId` 两个更新 ID。creator 上传要求 map/source，新建还要求 cover；管理 create/update 要求 map/cover。
 - **业务：** 配额为空禁止投稿；超配额 413、日限制 429、单文件超限 413、扩展名错误 422；用户只能更新自己的非 reviewing 地图。管理直接发布与创作者审核流程分开，不能全部统一成同一套默认字段。
-- **事务：** 协调文件上传、数据库写入、计数和成功后的旧文件清理。管理员 update 当前会递增发布版本、重置 inUse、清空 creator/source/pending，迁移必须有契约样例，不能按常规“部分更新”猜测实现。
+- **事务：** 协调文件上传、数据库写入、计数和成功后的旧文件清理。管理员 update 当前会递增发布版本、重置 inuse、清空 creatorId/sourceUrl/pendingUrl/pendingSourceUrl/pendingHash，并将 pendingVersion 设为本次入参，迁移必须有契约样例，不能按常规“部分更新”猜测实现。
 - **验收：** 编辑器 API Key 查询→投稿→审核→客户端列表/下载完整闭环；失败不误删旧正式文件；重复/并发审核结果确定。依赖 F08、F11、F28、F33、F36–F43。
 
 ### F25 `src/routers/room-router.ts`
@@ -238,7 +238,7 @@
 
 源文件：[apps/server/src/routers/user.ts](../../apps/server/src/routers/user.ts)。状态：[ ] 待拆分迁移。
 
-- **目标：** `user/AuthController.java`、`user/UserController.java`、`user/AdminUserController.java`、`security/MapKeyAdminController.java`、登录/注册/更新 DTO。
+- **目标：** `user/AuthController.java`、`user/UserController.java`、`user/AdminuserController.java`、`security/MapKeyAdminController.java`、登录/注册/更新 DTO。
 - **实施：** 覆盖 14 个接口，保持 `/user/encryption-key`、JSON 登录/刷新、multipart 注册与 query 删除参数；注册头像必填且 2 MiB，管理员创建不要求走注册上传路径。
 - **返回：** 创建/更新/注册统一使用安全用户 DTO，不透出完整数据库实体；登录和刷新继续返回 token/refreshToken。info 必须实际通过请求头认证，不承诺旧 handler 的 query token 回退能绕过中间件。
 - **修正：** 缺少 delete id 返回 400，不能继续悬挂请求；刷新查当前用户与权限；不存在/被删除用户不能借旧 refreshToken 恢复身份。限流、错误信息和加密缓存联动见接口文档。
@@ -336,8 +336,8 @@
 
 - **目标：** `storage/UploadWorkspace.java`、`storage/UploadCompensationService.java`、`storage/OrphanCleanupJob.java`。
 - **实施：** 追踪临时原名、重命名后文件、已成功上传对象；逐个登记成功结果，部分失败可回收。DB 提交前失败只删本次新文件，提交后再清理被替换旧文件；不得把“上传函数已返回”当成整个业务提交成功。
-- **可靠性：** 删除失败写入可重试清理记录，建议用新增 cleanup_task 表并有退避、次数和告警；按对象所有权及 URL→key 规则删除，避免把别的地图文件当孤儿。目录扫描只处理可证明过期的临时文件，不按时间直接清理全部正式资源。
-- **验收：** 第 2 个上传失败、DB 写入失败、旧文件删除失败、临时文件重命名失败、进程重启后清理任务恢复；已发布旧地图始终可下载。cleanup_task 是本轮拟新增运维辅助表，见数据文档。
+- **可靠性：** 删除失败写入可重试清理记录，建议用新增 storage_cleanup_task 表并有退避、次数和告警；按对象所有权及 URL→key 规则删除，避免把别的地图文件当孤儿。目录扫描只处理可证明过期的临时文件，不按时间直接清理全部正式资源。
+- **验收：** 第 2 个上传失败、DB 写入失败、旧文件删除失败、临时文件重命名失败、进程重启后清理任务恢复；已发布旧地图始终可下载。storage_cleanup_task 是本轮拟新增运维辅助表，见数据文档。
 
 ### F39 `src/utils/storage/file-validation.ts`
 
