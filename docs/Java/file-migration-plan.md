@@ -1,5 +1,7 @@
 # Java 逐文件迁移清单
 
+> 本文保留原 Node 文件职责及历史兼容验收项。当前实施以 [GameBackend monopoly 模块迁移升级方案](gamebackend-monopoly-upgrade-plan.md)为准，其中“原逐文件任务的重新归属”逐项覆盖 F01–F47。旧工程路径、旧表／密码／接口兼容要求已被新模块、新表、ACCOUNT／REALM 和 Result 方案替换；本文复选框不表示新方案已实现。
+
 源码基线、范围和工期见[任务总览](README.md)。以下覆盖 `git ls-files apps/server` 的全部 **47 个文件**，其中 42 个是 TypeScript 文件。清单按职责编排，编号稳定用于任务追踪，不表示执行顺序。
 
 **路径约定：**“目标”中的 Java 路径均相对于拟建的 `apps/server-java/src/main/java/com/minemonopoly/server/`；`resources/` 指拟建 `apps/server-java/src/main/resources/`。这些路径是实施方案，尚未创建。每项勾选前应补充实现提交和验收证据；“不迁移”表示无需生成对应 Java 类，旧文件待完整切换后再退役。

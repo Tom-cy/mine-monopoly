@@ -1,5 +1,7 @@
 # Java 数据部署与切换任务
 
+> 本文为旧库保留迁移的历史方案。当前已确认全新注册、区服和地图，新增 `monopoly_mine_` 表，不导入旧数据；旧库 baseline、旧文件搬迁及依赖同一五表的回滚方式不再适用。实施与发布以 [GameBackend monopoly 模块迁移升级方案](gamebackend-monopoly-upgrade-plan.md)为准，旧资料仅作历史系统运维参考。
+
 本方案以单实例 Java 业务 API、独立 Node PeerServer、原 coturn、原 MySQL 和原文件 URL 为基础。Unity、权威对局和集群高可用均不在此次迁移范围。全部任务尚待实施，生产数据结构和实际部署值必须在 P0 核对，不能由开发机配置推定。
 
 ## 数据表迁移

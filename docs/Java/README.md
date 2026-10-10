@@ -1,6 +1,10 @@
 # Java 服务端迁移任务
 
-评估日期：2026 年 10 月 10 日。源码基线：`61976ab6c020f77b14914cb0604afd49bf58b484`。任务状态：**评估完成，实施未开始**。
+**当前实施方向：** [GameBackend monopoly 模块迁移升级方案](gamebackend-monopoly-upgrade-plan.md)。在 `GameBackend/modules/monopoly` 新建独立模块，使用全新 `monopoly_mine_` 表、ACCOUNT／REALM 身份和统一 Result；用户重新注册、配置区服并发布地图，不导入旧数据。三端随新协议升级。
+
+以下为原独立 Java 服务兼容迁移评估，保留作范围和源码参考。旧工程路径、Java 21／Boot 4、JDBC、旧表／旧账号兼容、旧返回协议及原工期不再作为当前实施约定；冲突以新方案为准。**新方案已编写，业务实现未开始。**
+
+原评估日期：2026 年 10 月 10 日。源码基线：`61976ab6c020f77b14914cb0604afd49bf58b484`。
 
 本轮目标是将 `apps/server` 的业务服务迁移到 Java，继续支持现有游戏客户端、管理后台和地图编辑器。**Unity 独立客户端任务待定，不纳入本轮排期。** 此前讨论的 Java 对局消息转发方案 C、服务端权威规则、移动端离线续局，也不属于此次服务端语言迁移。
 
@@ -10,6 +14,7 @@
 
 | 文档 | 用途 |
 | --- | --- |
+| [GameBackend monopoly 模块迁移升级方案](gamebackend-monopoly-upgrade-plan.md) | 当前实施依据：全新数据、账号选服、模块隔离、Result、上传升级和 F01–F47 新归属 |
 | [逐文件迁移清单](file-migration-plan.md) | 对照全部 47 个服务端文件分配实施任务，包含拟新增 Java 文件和验收项 |
 | [接口与客户端兼容清单](api-compatibility.md) | 39 个业务接口、鉴权、加密、上传格式及少量前端配套改动 |
 | [数据部署与切换方案](data-and-deployment.md) | 数据表、配置、PeerServer 拆分、文件搬迁、发布和回滚 |

@@ -1,5 +1,7 @@
 # Java 接口与客户端兼容清单
 
+> 本文描述原 39 个接口及旧兼容方案。当前三端统一升级至 `/monopoly-api`、ACCOUNT／REALM 与 Result，以 [GameBackend monopoly 模块迁移升级方案](gamebackend-monopoly-upgrade-plan.md)中的接口映射和鉴权矩阵为准，不再要求兼容旧 token、旧登录加密或旧返回形态。
+
 范围与排期见[任务总览](README.md)。本清单以现有 Express 挂载路径为准，路径不含反向代理的 `API_BASE_PREFIX`。共 **39 个业务接口**，另列健康检查、文件、后台静态服务和 PeerServer。
 
 目标是保留现有三端可观察的业务契约，并对明确列出的缺陷进行配套修正。所有路由都需要正常、缺参数、权限不足和依赖故障样例；不能仅验证“HTTP 200 可访问”。以下“原认证”描述源码现状，不表示所有行为都应照搬。
