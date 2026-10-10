@@ -297,6 +297,8 @@ docker compose -f docker/docker-compose.yml up -d
 | 文档                                          | 说明                         |
 | --------------------------------------------- | ---------------------------- |
 | [技术架构与技术栈评估](docs/technical-assessment.md) | 实际架构、依赖版本、部署路径与改进优先级 |
+| [Java 对局消息转发方案评估](docs/java-websocket-relay-assessment.md) | 方案 C 架构、重连、地图传输、容量与工作量 |
+| [Unity 新版架构评估](docs/unity-platform-architecture-assessment.md) | 独立客户端、权威对局、后端选型与地图迁移 |
 | [开发指南](docs/development-guide.md)         | 架构设计、核心概念、编码规范 |
 | [游戏进程 API](docs/game-process-api.md)      | effectCode 公开 API 参考     |
 | [修饰器系统 API](docs/api/modifier-system.md) | 修饰器模板用法与迁移指南     |

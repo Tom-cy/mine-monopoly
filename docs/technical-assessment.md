@@ -2,6 +2,8 @@
 
 评估日期：2026 年 10 月 10 日。代码基线：`4621384`。适用读者：项目维护者、接手开发者和部署人员。
 
+后续产品方向已明确为 Unity 新版独立运行并逐步替换现有客户端。下文描述现有系统；新版技术选型与迁移边界见 [Unity 新版架构评估](unity-platform-architecture-assessment.md)。
+
 MineMonopoly 是一套以 TypeScript 为主的多人桌游与地图创作系统。Vue 负责界面，Three.js 负责主要游戏渲染，房主客户端的 Web Worker 执行游戏规则，PeerJS/WebRTC 传递对局消息，Express 与 MySQL 提供账号、房间登记和地图管理服务。
 
 **建议保留现有技术栈继续演进。** 它与回合制桌游、可编程地图和跨端界面的需求匹配，地图编辑器、共享类型和运行时之间已经形成复用基础。下一阶段应优先修正配置暴露、鉴权、持久化和工程验证问题，再拆分大型游戏模块。若产品需要强反作弊或房主离线后持续运行，则需要另行设计服务端权威对局架构。
@@ -110,7 +112,7 @@ flowchart TB
 | --- | --- | --- |
 | 账号、地图、房间登记与心跳 | HTTP 请求 | [API 调用](../apps/client/src/utils/api/room-router.ts)、[房间路由](../apps/server/src/routers/room-router.ts) |
 | 玩家到房主 | PeerJS WebRTC DataConnection | [MonopolyHost](../apps/client/src/core/monopoly-host/MonopolyHost.ts) |
-| 对局消息载荷 | JSON 字符串，接收时解析并处理特殊数值 | [MonopolyHost](../apps/client/src/core/monopoly-host/MonopolyHost.ts) |
+| 对局消息载荷 | 普通消息为 JSON 字符串；自定义地图另用二进制分块；接收时处理特殊数值 | [MonopolyHost](../apps/client/src/core/monopoly-host/MonopolyHost.ts)、[会话接收](../apps/client/src/core/network/WebRtcSessionManager.ts) |
 | 房主主线程到规则线程 | Worker `postMessage` | [Room](../apps/client/src/core/monopoly-host/Room.ts)、[Worker 消息类型](../apps/client/src/interfaces/worker.ts) |
 | 地图产物文件 | Protobuf 外层封装及资源字节 | [产物编码](../packages/utils/protos/product.ts) |
 | AI 编辑器工具调用 | MCP Streamable HTTP，再经 Electron IPC | [HTTP 服务](../apps/map-editor/src/mcp/http-server.ts) |
@@ -320,6 +322,7 @@ pnpm dev-server
 
 ## 8 后续阅读
 
+- [Java 对局消息转发方案评估](java-websocket-relay-assessment.md)：方案 C 的架构、兼容、容量与迁移工作量。
 - [开发指南](development-guide.md)：核心概念与现有开发约定。
 - [游戏进程 API](game-process-api.md)：地图脚本可使用的运行时接口。
 - [修饰器系统](api/modifier-system.md)：命令修饰和消耗语义。
