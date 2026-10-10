@@ -296,6 +296,7 @@ docker compose -f docker/docker-compose.yml up -d
 
 | 文档                                          | 说明                         |
 | --------------------------------------------- | ---------------------------- |
+| [技术架构与技术栈评估](docs/technical-assessment.md) | 实际架构、依赖版本、部署路径与改进优先级 |
 | [开发指南](docs/development-guide.md)         | 架构设计、核心概念、编码规范 |
 | [游戏进程 API](docs/game-process-api.md)      | effectCode 公开 API 参考     |
 | [修饰器系统 API](docs/api/modifier-system.md) | 修饰器模板用法与迁移指南     |
