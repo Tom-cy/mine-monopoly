@@ -2303,7 +2303,10 @@ export class GameProcess implements IGameProcess {
 			}
 
 			// 5. 成功后的通用处理
-			await sourcePlayer.loseCard(chanceCardId); // 扣除卡片
+			// 效果触发破产时，清算可能已移除全部手牌，无需再次扣除。
+			if (!sourcePlayer.isBankrupted || sourcePlayer.getCardById(chanceCardId)) {
+				await sourcePlayer.loseCard(chanceCardId);
+			}
 
 			// 发送成功通知给当前玩家
 			this.sendToPlayer(sourcePlayer.id, {
