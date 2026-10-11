@@ -72,7 +72,7 @@ const player = load("src/core/worker/class/Player.ts", {
 });
 const property = load("src/core/worker/class/Property.ts", commonDependencies);
 
-async function fixture(effectCode, type = types.TargetSelectType.ToSelf) {
+async function fixture(effectCode, type = types.TargetSelectType.ToSelf, extraMapItems = []) {
 	const messages = [];
 	const { GameProcess } = load(
 		"src/core/worker/GameProcessWorker.ts",
@@ -81,6 +81,7 @@ async function fixture(effectCode, type = types.TargetSelectType.ToSelf) {
 			"@mine-monopoly/utils": load("../../packages/utils/game/map.ts"),
 			"@src/enums/worker": workerTypes,
 			"@src/utils": utils,
+			"@src/utils/scene-decoration": load("src/utils/scene-decoration.ts"),
 			"@src/utils/html": { generatePropertySchema: () => ({}) },
 			"./editor-lib.d.ts?raw": { default: "", __esModule: true },
 			"./class/OperateListener": load("src/core/worker/class/OperateListener.ts", commonDependencies),
@@ -117,6 +118,7 @@ async function fixture(effectCode, type = types.TargetSelectType.ToSelf) {
 			{ id: "toll", type: { id: "road", name: "Road" }, linkto: "toll-property" },
 			{ id: "toll-property", property: newProperty("toll-property") },
 			{ id: "source-property", property: newProperty("source-property") },
+			...extraMapItems,
 		],
 		mapEvents: [],
 		chanceCards: [
@@ -245,5 +247,23 @@ test("unexpected card removal without bankruptcy is still reported as a failure"
 	assert.equal(await context.game.handleUseChanceCard(context.source, context.card.getId(), []), false);
 	assert.equal(context.source.isBankrupted, false);
 	assert.deepEqual(context.lostCardIds, [context.card.getId()]);
+	assertCallback(context, true);
+});
+
+test("pure scene decorations stay outside gameplay state and chance-card targets while legacy park tiles remain", async () => {
+	const context = await fixture("async (source, target, game) => { game.customData.effectRan = true; }", types.TargetSelectType.ToMapItem, [
+		{ id: "palace", type: { id: "palace-type", name: "Palace", sceneDecoration: true } },
+		{ id: "legacy-park", type: { id: "park-type", name: "Park" } },
+	]);
+	assert.equal(context.game.mapData.mapItems.some((item) => item.id === "palace"), true);
+	assert.equal(context.game.getMapItemById("palace"), undefined);
+	assert.equal(context.game.getMapItemById("legacy-park").id, "legacy-park");
+	const targetIds = Array.from(context.game.buildTargetDecisionOptions(context.source, types.TargetSelectType.ToMapItem), (item) => item.id);
+	assert.equal(targetIds.includes("palace"), false);
+	assert.equal(targetIds.includes("legacy-park"), true);
+	assert.equal(targetIds.includes("toll-property"), true);
+	assert.equal(await context.game.handleUseChanceCard(context.source, context.card.getId(), ["palace"]), false);
+	assert.equal(context.game.customData.effectRan, undefined);
+	assert.equal(context.source.getCardById(context.card.getId()), context.card);
 	assertCallback(context, true);
 });

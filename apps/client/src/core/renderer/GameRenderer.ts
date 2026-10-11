@@ -49,6 +49,20 @@ import { clone } from "lodash";
 import { getDracoLoader } from "@src/utils/draco/draco";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader";
 import { MapPathChoiceSceneController, setMapPathChoiceArrowFactory } from "./MapPathChoiceSceneController";
+import {
+	isSceneDecorationObject,
+	isVolumetricSceneModel,
+	prepareSceneDecoration,
+	updateSceneDecorationBillboards,
+} from "./SceneDecoration";
+import { hasSceneVisualContract, shouldHideOriginalSceneTile } from "./SceneVisual";
+import { WaterSurfaceEffect } from "./WaterSurface";
+import { isSceneDecoration, isSceneBase } from "@src/utils/scene-decoration";
+import {
+	preparePropertyBuildingModel,
+	resolvePropertyBuildingModelId,
+	usesLatestPropertySpriteGround,
+} from "./PropertyBuildingVisual";
 
 const PLAY_MODEL_SIZE = 0.7;
 const loadingMask = useLoading();
@@ -111,6 +125,11 @@ export class GameRenderer {
 		}
 	> = new Map();
 	private mapItemsInScene: Map<string, THREE.Group> = new Map<string, THREE.Group>();
+	private sceneDecorationSprites: THREE.Mesh[] = [];
+	private waterSurface = new WaterSurfaceEffect();
+	private propertyBuildingSprites: Map<string, THREE.Mesh[]> = new Map();
+	private buildingUpdateRevisions: Map<string, number> = new Map();
+	private buildingUpdateEpoch = 0;
 
 	private playerEntities: Map<string, PlayerModel> = new Map<string, PlayerModel>();
 	private housesModules: Map<string, THREE.Group> = new Map<string, THREE.Group>();
@@ -261,6 +280,14 @@ export class GameRenderer {
 				controls.minDistance = 1;
 				controls.maxPolarAngle = Math.PI / 2;
 				controls.minPolarAngle = Math.PI / 3;
+				if (hasSceneVisualContract(this.mapData)) {
+					if (this.mapData.sceneVisual?.mode === "volumetric") {
+						controls.minPolarAngle = THREE.MathUtils.degToRad(30);
+						controls.maxPolarAngle = THREE.MathUtils.degToRad(70);
+					} else {
+						controls.enableRotate = false;
+					}
+				}
 				controls.update();
 				this.controls = controls;
 				this.pathChoiceController = new MapPathChoiceSceneController({
@@ -387,6 +414,7 @@ export class GameRenderer {
 				// 更新 GLB 模型动画
 				const delta = this.clock.getDelta();
 				this.animationManager.update(delta);
+				this.waterSurface.update(delta);
 
 				this.handlePropertyRaycaster(propertyRaycaster, pointer);
 				this.handleMapEventRaycaster(propertyRaycaster, pointer);
@@ -405,6 +433,8 @@ export class GameRenderer {
 				if (!this.pathChoiceController.isCameraTransitioning) {
 					this.controls.update(delta);
 				}
+				updateSceneDecorationBillboards(this.sceneDecorationSprites, this.camera);
+				for (const sprites of this.propertyBuildingSprites.values()) updateSceneDecorationBillboards(sprites, this.camera);
 
 				Array.from(this.playerEntities.values()).forEach((player) => {
 					player.update(this.camera);
@@ -500,6 +530,13 @@ export class GameRenderer {
 	}
 
 	private initBackground() {
+		// 棋盘必须独立于背景图片挂载；无背景地图也能完整显示模型。
+		this.scene.add(this.mapContainer);
+		if (hasSceneVisualContract(this.mapData) && this.mapData.sceneVisual?.mode === "volumetric") {
+			this.scene.background = new THREE.Color("#e8f5fa");
+			this.scene.fog = new THREE.Fog("#e8f5fa", 55, 130);
+			return;
+		}
 		const bgTextureLoader = new THREE.TextureLoader();
 		const bgResource = useResourceStore().getRecourceById(this.mapData.info.backgroundImageId);
 		if (!bgResource) return;
@@ -507,7 +544,6 @@ export class GameRenderer {
 		const bgTexture = bgTextureLoader.load(bgResource.url);
 
 		this.scene.background = bgTexture;
-		this.scene.add(this.mapContainer);
 	}
 
 	private async initMap() {
@@ -538,15 +574,34 @@ export class GameRenderer {
 		const textureLoader = new THREE.TextureLoader();
 
 		const mapItems = this.mapData.mapItems;
+		const mapInfo = useMapData();
+		const properties = useGameData().properties;
 		for (const mapItem of mapItems) {
+			if (!Number.isFinite(mapItem.x) || !Number.isFinite(mapItem.y)) throw Error(`地图项 ${mapItem.id} 的坐标必须是有限数值`);
+			const isDecoration = isSceneDecoration(mapItem.type);
+			const property =
+				mapItem.property && (properties.find((candidate) => candidate.id === mapItem.property?.id) ?? mapItem.property);
+			const isLatestPropertyGround =
+				!isDecoration &&
+				property &&
+				usesLatestPropertySpriteGround(property, mapInfo, (id) => this.mapModules.get(id)?.scene);
 			const modelData = this.mapModules.get(mapItem.type.modelId);
-			if (!modelData) throw Error("加载MapItem时找不到模型");
+			const hideOriginal = shouldHideOriginalSceneTile(this.mapData, mapItem, (id) => this.mapModules.get(id)?.scene);
+			if (!modelData && !isLatestPropertyGround && !hideOriginal) throw Error("加载MapItem时找不到模型");
 
 			// Handle animated models differently
 			let mapItemModel: THREE.Group;
 			let originalY = 0;
 
-			if (modelData.hasAnimations) {
+			if (hideOriginal) {
+				mapItemModel = new THREE.Group();
+				mapItemModel.userData.replacedSceneGround = true;
+			} else if (isLatestPropertyGround) {
+				// 新产权模型自带底座；保持与编辑器相同的锚点，避免与旧街区叠加。
+				mapItemModel = new THREE.Group();
+				originalY = 0.13;
+				mapItemModel.userData.latestPropertyGround = true;
+			} else if (modelData?.hasAnimations) {
 				// Deep clone for animated models to preserve bone structure
 				mapItemModel = modelData.scene.clone(true) as THREE.Group;
 				originalY = mapItemModel.position.y;
@@ -561,26 +616,32 @@ export class GameRenderer {
 				}
 			} else {
 				// Shallow copy for non-animated models
-				mapItemModel = new THREE.Group().copy(modelData.scene);
-				originalY = modelData.scene.position.y;
+				mapItemModel = new THREE.Group().copy(modelData!.scene);
+				originalY = modelData!.scene.position.y;
 			}
 
 			mapItemModel.userData["position"] = { x: mapItem.x, y: mapItem.y };
 			mapItemModel.userData["rotation"] = mapItem.rotation;
 			mapItemModel.userData["id"] = mapItem.id;
-			mapItemModel.userData["isMapItem"] = true;
-			if (mapItem.mapEventId) {
+			mapItemModel.userData["isMapItem"] = !isDecoration;
+			if (!isDecoration && mapItem.mapEventId) {
 				const mapEvent = useMapData().getMapEventById(mapItem.mapEventId);
 				if (mapEvent) mapItemModel.userData["mapEvent"] = clone(mapEvent);
 			}
 
 			// 使用原始模型的Y偏移来放置地皮
-			this.setItemPositionOnMap(mapItemModel, mapItem.x, mapItem.y, mapItem.rotation, originalY);
+			const volumetric = isVolumetricSceneModel(mapItemModel);
+			const modelY = isDecoration ? (isSceneBase(mapItem.type) ? -0.18 : volumetric ? -0.12 : 0.07) : originalY;
+			this.setItemPositionOnMap(mapItemModel, mapItem.x, mapItem.y, isDecoration && !volumetric ? 0 : mapItem.rotation, modelY);
+			if (isDecoration) {
+				this.sceneDecorationSprites.push(...prepareSceneDecoration(mapItemModel, mapItem.type.size, useSettig().enableShadow));
+				this.waterSurface.prepare(mapItemModel);
+			}
 			this.mapItemsInScene.set(mapItem.id, mapItemModel);
 			this.mapContainer.add(mapItemModel);
 
 			// [修改] 如果有事件图标，需要计算当前格子的表面高度来放置图标
-			if (mapItem.mapEventId) {
+			if (!isDecoration && mapItem.mapEventId) {
 				const arrivedEvent = useMapData().getMapEventById(mapItem.mapEventId);
 				if (!arrivedEvent) continue;
 				const iconUrl = useResourceStore().getRecourceById(arrivedEvent.iconId)?.url;
@@ -616,21 +677,19 @@ export class GameRenderer {
 	private async initProperties() {
 		//加载地皮
 		const gameInfo = useGameData();
-		gameInfo.properties.forEach((property) => {
-			const textSprite = new TextSprite(
-				`${property.name}\n可购买: ${Math.round(property.sellCost)}￥`,
-				64,
-				"#000000",
-				10,
-				82,
-			);
-			// textSprite.getSprite().scale.set(2.5, 2.5, 2.5);
-			this.housesItems.set(property.id, {
-				group: new THREE.Group(),
-				textSprite: textSprite,
-			});
-			this.updateBuilding(property);
-		});
+		await Promise.all(
+			gameInfo.properties.map(async (property) => {
+				const textSprite = new TextSprite(
+					`${property.name}\n可购买: ${Math.round(property.sellCost)}￥`,
+					64,
+					"#000000",
+					10,
+					82,
+				);
+				this.housesItems.set(property.id, { group: new THREE.Group(), textSprite });
+				await this.updateBuilding(property);
+			}),
+		);
 	}
 
 	private async initPlayer() {
@@ -851,7 +910,7 @@ export class GameRenderer {
 				// 地图格子
 				for (const mapItemId of targetIdList) {
 					const mapItem = this.mapItemsInScene.get(mapItemId);
-					if (mapItem) {
+					if (mapItem && !isSceneDecorationObject(mapItem)) {
 						positions.push(mapItem.position.clone());
 					}
 				}
@@ -1442,7 +1501,8 @@ export class GameRenderer {
 		});
 		for (const key of ["level", "owner", "costList"]) {
 			this.onEvent(`property-${key}`, async (propertyId: string) => {
-				this.updateBuilding(useGameData().getPropertyById(propertyId)!);
+				const property = useGameData().getPropertyById(propertyId);
+				if (property) await this.updateBuilding(property);
 			});
 		}
 
@@ -1507,13 +1567,17 @@ export class GameRenderer {
 		const intersects = raycaster.intersectObjects(Array.from(this.housesItems.values()).map((h) => h.group));
 		if (intersects.length > 0) {
 			const intersect = intersects[0];
-			const target = intersect.object.parent as THREE.Group;
-			const propertyInfo = target.userData as any;
-			if (propertyInfo.isProperty) {
+			let target: THREE.Object3D | null = intersect.object;
+			while (target && target.userData.isProperty !== true) target = target.parent;
+			if (target) {
+				const propertyInfo = target.userData;
 				this.propertyInfoLabel.position.copy(target.position);
-				this.propertyInfoLabel.position.y += new THREE.Box3().setFromObject(target).max.y;
+				this.propertyInfoLabel.position.y = new THREE.Box3().setFromObject(target).max.y;
 				//@ts-ignore
 				this.propertyInfoLabelInstance.updateProperty(propertyInfo);
+			} else {
+				//@ts-ignore
+				this.propertyInfoLabelInstance.updateProperty(null);
 			}
 		} else {
 			//@ts-ignore
@@ -1525,7 +1589,7 @@ export class GameRenderer {
 		// 通过摄像机和鼠标位置更新射线
 		raycaster.setFromCamera(pointer, this.camera);
 
-		const intersects = raycaster.intersectObjects(Array.from(this.mapItemsInScene.values()));
+		const intersects = raycaster.intersectObjects(Array.from(this.mapItemsInScene.values()).filter((item) => !isSceneDecorationObject(item)));
 		if (intersects.length > 0) {
 			const firstInstance = intersects[0];
 			let target: THREE.Object3D | null = firstInstance.object;
@@ -1556,6 +1620,9 @@ export class GameRenderer {
 	public destroy() {
 		if (this.destroyed) return;
 		this.destroyed = true;
+		this.buildingUpdateEpoch++;
+		this.buildingUpdateRevisions.clear();
+		this.propertyBuildingSprites.clear();
 		cancelAnimationFrame(this.requestAnimationFrameId);
 		this.cleanupCallbacks.splice(0).forEach((cleanup) => cleanup());
 		Array.from(this.mountedPopovers.values()).forEach((unmount) => unmount());
@@ -1565,6 +1632,8 @@ export class GameRenderer {
 		this.playerPendingWalks.clear();
 		this.activeChanceCard3Ds.forEach((card) => card.dispose());
 		this.activeChanceCard3Ds = [];
+		this.sceneDecorationSprites = [];
+		this.waterSurface.dispose();
 		gsap.killTweensOf([this.camera.position, this.controls.target]);
 		Array.from(this.playerWatchers.values()).forEach((watchers) => {
 			watchers.InfoWatcher && watchers.InfoWatcher();
@@ -1733,11 +1802,19 @@ export class GameRenderer {
 	}
 
 	private async updateBuilding(newProperty: PropertyInfo) {
+		if (this.destroyed) return;
+		const revision = (this.buildingUpdateRevisions.get(newProperty.id) ?? 0) + 1;
+		const epoch = this.buildingUpdateEpoch;
+		this.buildingUpdateRevisions.set(newProperty.id, revision);
+		const isCurrent = () =>
+			!this.destroyed && epoch === this.buildingUpdateEpoch && this.buildingUpdateRevisions.get(newProperty.id) === revision;
 		const oldModel = this.housesItems.get(newProperty.id);
 		if (oldModel) {
 			await gsap.to(oldModel.group.scale, { x: 0, y: 0, z: 0, duration: 0.2 });
+			if (!isCurrent()) return;
 			this.mapContainer.remove(oldModel.group);
 		}
+		this.propertyBuildingSprites.delete(newProperty.id);
 		const mapInfo = useMapData();
 		const targetMapItem = mapInfo.getMapItemByPropertyId(newProperty.id);
 		if (!targetMapItem) return;
@@ -1747,14 +1824,8 @@ export class GameRenderer {
 		// [修改] 获取目标格子的表面高度
 		const surfaceY = this.getMapItemSurfaceHeight(targetMapItemModel);
 
-		const modelIdList = newProperty.buildingModelIdList ?? mapInfo.buildingModelIdList;
-		if (!modelIdList || modelIdList.length === 0) return;
-		const getModel = (index: number) => {
-			const id = modelIdList[index];
-			const modelData = id ? this.mapModules.get(id) : undefined;
-			return modelData?.scene;
-		};
-		const buildModel = getModel(newProperty.level) ?? getModel(modelIdList.length - 1);
+		const selectedModelId = resolvePropertyBuildingModelId(newProperty, mapInfo, (id) => this.mapModules.has(id));
+		const buildModel = selectedModelId ? this.mapModules.get(selectedModelId)?.scene : undefined;
 
 		if (!buildModel) return;
 		const propertyBuildModel = buildModel.clone();
@@ -1762,7 +1833,9 @@ export class GameRenderer {
 		// [修改] 设置为表面高度，替代 BLOCK_HEIGHT
 		propertyBuildModel.position.y = surfaceY;
 		propertyBuildModel.scale.copy(targetMapItemModel.scale);
-		propertyBuildModel.userData = { ...newProperty, isProperty: true };
+		propertyBuildModel.userData = { ...propertyBuildModel.userData, ...newProperty, isProperty: true };
+		const buildingVisual = preparePropertyBuildingModel(propertyBuildModel);
+		const targetScale = buildingVisual?.width ?? 1;
 		propertyBuildModel.traverse((object) => {
 			if (object.userData.name) {
 				const meshName = object.userData.name as string;
@@ -1793,18 +1866,24 @@ export class GameRenderer {
 
 			const lookat = new THREE.Vector3();
 			lookat.copy(linkItem.position);
-			lookat.setY(linkSurfaceY);
+			// 新产权模型只朝向相邻路线；路线台面的高度差不应让建筑向前倾斜。
+			lookat.setY(buildingVisual ? propertyBuildModel.position.y : linkSurfaceY);
 			propertyBuildModel.lookAt(lookat);
 			// propertyBuildModel.rotateY(-Math.PI / 2);
 		}
 		propertyBuildModel.scale.set(0, 0, 0);
+		if (!isCurrent()) return;
+		if (buildingVisual) this.propertyBuildingSprites.set(newProperty.id, buildingVisual.sprites);
+		const houseItem = this.housesItems.get(newProperty.id);
+		if (houseItem) houseItem.group = propertyBuildModel;
 		this.mapContainer.add(propertyBuildModel);
 		gsap.to(propertyBuildModel.scale, {
-			x: 1,
-			y: 1,
-			z: 1,
+			x: targetScale,
+			y: targetScale,
+			z: targetScale,
 			duration: 0.4,
 			onComplete: () => {
+				if (!isCurrent()) return;
 				const houseItem = this.housesItems.get(newProperty.id);
 				if (houseItem) {
 					const costList = newProperty.costList;
@@ -1822,10 +1901,12 @@ export class GameRenderer {
 						);
 					}
 					const textSpriteModel = houseItem.textSprite.getSprite();
-					const box = new THREE.Box3().setFromObject(propertyBuildModel);
-					// 计算边界框的高度
-					const size = box.getSize(new THREE.Vector3());
-					textSpriteModel.position.y = 1;
+					if (buildingVisual && isVolumetricSceneModel(propertyBuildModel)) {
+						const buildingTop = new THREE.Box3().setFromObject(propertyBuildModel).max.y;
+						textSpriteModel.position.y = (buildingTop - propertyBuildModel.position.y) / targetScale + 0.18;
+					} else {
+						textSpriteModel.position.y = buildingVisual ? 1.1 : 1;
+					}
 					propertyBuildModel.add(textSpriteModel);
 					houseItem.group = propertyBuildModel;
 				}
@@ -2123,6 +2204,9 @@ export class GameRenderer {
 	 * 用于窗口恢复焦点时完全重新渲染
 	 */
 	public async reloadScene() {
+		this.buildingUpdateEpoch++;
+		this.buildingUpdateRevisions.clear();
+		this.propertyBuildingSprites.clear();
 		// 1. 取消所有动画
 		this.playerPendingWalks.clear();
 		this.clearAllThinkingMarkers();
@@ -2136,7 +2220,7 @@ export class GameRenderer {
 			this.mapContainer.remove(houseItem.group);
 			houseItem.group.traverse((object) => {
 				// @ts-ignore
-				if (object.isMesh) {
+				if (object.isMesh && object.userData.china24PropertyBuildingModel !== true) {
 					const mesh = object as THREE.Mesh;
 					if (Array.isArray(mesh.material)) {
 						mesh.material.forEach((m) => m.dispose());
@@ -2310,7 +2394,7 @@ export class GameRenderer {
 		}
 
 		const mapItemModel = this.mapItemsInScene.get(mapItemId);
-		if (!mapItemModel) return;
+		if (!mapItemModel || isSceneDecorationObject(mapItemModel)) return;
 
 		const iconUrl = useResourceStore().getRecourceById(mapEvent.iconId)?.url;
 		if (!iconUrl) return;
@@ -2382,7 +2466,7 @@ export class GameRenderer {
 		mapEvent: { id: string; name: string; description: string } | null,
 	): void {
 		const mapItemModel = this.mapItemsInScene.get(mapItemId);
-		if (!mapItemModel) return;
+		if (!mapItemModel || isSceneDecorationObject(mapItemModel)) return;
 		if (mapEvent) {
 			mapItemModel.userData["mapEvent"] = clone(mapEvent);
 		} else {
@@ -2943,8 +3027,13 @@ export class GameRenderer {
 		// 遍历场景中所有对象，更新阴影属性
 		this.scene.traverse((object) => {
 			if ((object as THREE.Mesh).isMesh) {
-				(object as THREE.Mesh).castShadow = enable;
-				(object as THREE.Mesh).receiveShadow = enable;
+				const hasShadow =
+					enable &&
+					(!isSceneDecorationObject(object) || object.userData.china24VolumetricDecoration === true) &&
+					object.userData.china24PropertyBuildingSprite !== true &&
+					object.userData.china24WaterSurface !== true;
+				(object as THREE.Mesh).castShadow = hasShadow;
+				(object as THREE.Mesh).receiveShadow = hasShadow;
 			}
 		});
 

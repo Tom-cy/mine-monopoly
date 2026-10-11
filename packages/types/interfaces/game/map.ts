@@ -203,6 +203,21 @@ export interface GameMap {
 	/** 建筑模型 ID 列表 */
 	buildingModelIdList: string[];
 
+	/** 显式启用产权外观：未购买使用独立 L0，已购买按业务等级索引建筑列表。 */
+	buildingVisual?: {
+		version: 1;
+		collection: "china24-property-models-v1";
+		unownedModelId: string;
+	};
+
+	/** 场景展示模式；只替代默认空公园的网格，保留原业务项与图片。 */
+	sceneVisual?: {
+		version: 1;
+		mode: "volumetric" | "illustrated";
+		collection: "china24-3d-models-v1";
+		hiddenOriginalTileIds: string[];
+	};
+
 	/** UI 模板列表 */
 	uiTemplates: UITemplate[];
 

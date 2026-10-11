@@ -286,7 +286,7 @@ export async function loadGameMapFromServer(mapId: string, options: MapLoadOptio
 		validateMapBeforeCommit(gameMap, mapData.imageFiles);
 		assertMapLoadActive(options.signal);
 		loadMapDataToResourceStore(mapData);
-		useMapData().$patch(gameMap);
+		useMapData().$patch({ ...gameMap, buildingVisual: gameMap.buildingVisual, sceneVisual: gameMap.sceneVisual });
 		useLoading().hideLoading();
 		const cover = useResourceStore().getRecourceById(gameMap.info.coverImageId);
 		return {
@@ -322,7 +322,7 @@ export async function loadGameMapFromFile(file: ArrayBuffer, options: MapLoadOpt
 	validateMapBeforeCommit(gameMap, mapData.imageFiles, true);
 	assertMapLoadActive(options.signal);
 	loadMapDataToResourceStore(mapData);
-	useMapData().$patch(gameMap);
+	useMapData().$patch({ ...gameMap, buildingVisual: gameMap.buildingVisual, sceneVisual: gameMap.sceneVisual });
 	const coverResource = useResourceStore().getRecourceById(gameMap.info.coverImageId);
 	if (!coverResource) throw Error("读取封面失败");
 	const mapInfo: GameMapInDb = {

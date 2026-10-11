@@ -58,6 +58,8 @@ export const useMapData = defineStore("map-data", {
 		inUse: false,
 		mapEvents: [],
 		buildingModelIdList: ["", "", ""],
+		buildingVisual: undefined,
+		sceneVisual: undefined,
 		uiTemplates: [],
 		customUIs: [],
 		extraLibs: "",

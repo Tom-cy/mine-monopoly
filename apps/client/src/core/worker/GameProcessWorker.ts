@@ -81,6 +81,7 @@ import { aiManager } from "./ai";
 import type { Emitter } from "mitt";
 import { SaveSnapshot, PlayerSnapshot, PropertySnapshot } from "@src/core/save/types";
 import { applyWorkerSandbox } from "./security";
+import { isSceneDecoration } from "@src/utils/scene-decoration";
 
 import {
 	buildMapPathAdjacency,
@@ -1487,6 +1488,7 @@ export class GameProcess implements IGameProcess {
 		}
 
 		for (const mapItem of mapItems) {
+			if (isSceneDecoration(mapItem.type)) continue;
 			if (mapItem.property && mapItem.property.custom) {
 				mapItem.property.custom.effectCode = processCode(mapItem.property.custom.effectCode);
 			}
@@ -1542,6 +1544,7 @@ export class GameProcess implements IGameProcess {
 		});
 
 		mapItems.forEach((mapItem) => {
+			if (isSceneDecoration(mapItem.type)) return;
 			if (mapItem.property) {
 				const property = mapItem.property;
 				this.properties.set(property.id, new Property(property, this.mapData.extraLibs));
@@ -2296,7 +2299,7 @@ export class GameProcess implements IGameProcess {
 					const targetMapItemId = targetIdList[0];
 					if (!targetMapItemId) throw new Error("目标地图项不存在");
 					const targetMapItem = this.mapItems.get(targetMapItemId);
-					if (!targetMapItem) throw new Error("目标地图项不存在");
+					if (!targetMapItem || isSceneDecoration(targetMapItem.type)) throw new Error("目标地图项不存在");
 					await this.executeChanceCardWithAnimation(sourcePlayer, chanceCard, targetMapItemId, [targetMapItem.id]);
 					this.msgNotifyBroadcast(
 						"info",
@@ -2508,7 +2511,7 @@ export class GameProcess implements IGameProcess {
 	public getPathMapItemIds(): string[] {
 		const pathMapItemTypeIds = new Set(this.mapData.pathMapItemTypeIds ?? []);
 		return this.mapData.mapItems
-			.filter((mapItem) => pathMapItemTypeIds.has(mapItem.type.id))
+			.filter((mapItem) => !isSceneDecoration(mapItem.type) && pathMapItemTypeIds.has(mapItem.type.id))
 			.map((mapItem) => mapItem.id);
 	}
 
@@ -2874,7 +2877,7 @@ export class GameProcess implements IGameProcess {
 			player: player.getPlayerInfo(),
 			players: gameData.players,
 			properties: gameData.properties,
-			mapItems: this.mapData.mapItems.map((item) => ({
+			mapItems: this.mapData.mapItems.filter((item) => !isSceneDecoration(item.type)).map((item) => ({
 				id: item.id,
 				type: item.type,
 				x: item.x,
@@ -3020,7 +3023,7 @@ export class GameProcess implements IGameProcess {
 					};
 				});
 			case TargetSelectType.ToMapItem:
-				return this.mapData.mapItems.map((item) => ({
+				return this.mapData.mapItems.filter((item) => !isSceneDecoration(item.type)).map((item) => ({
 					id: item.id,
 					label: item.property?.name || item.type.name || item.id,
 					actionType: "target",

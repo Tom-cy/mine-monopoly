@@ -30,7 +30,7 @@ function load(file, dependencies = {}, environment = {}) {
 	return module.exports;
 }
 
-function fixture() {
+function fixture(mapOverrides = {}) {
 	const messages = [];
 	const executed = [];
 	const types = {
@@ -52,13 +52,19 @@ function fixture() {
 	const { GameProcess } = load("src/core/worker/GameProcessWorker.ts", {
 		"@mine-monopoly/types": types,
 		"@mine-monopoly/utils": load("../../packages/utils/game/map.ts"),
+		"@src/utils/scene-decoration": load("src/utils/scene-decoration.ts"),
 		"@src/enums/worker": workerTypes,
 		"@src/utils": utils,
 		"@src/utils/html": { generatePropertySchema: () => ({}) },
 		"./editor-lib.d.ts?raw": { __esModule: true, default: "" },
 		"./class/OperateListener": load("src/core/worker/class/OperateListener.ts", common),
 		"./class/Player": {},
-		"./class/Property": {},
+		"./class/Property": load("src/core/worker/class/Property.ts", {
+			...common,
+			"../utils/serialize": load("src/core/worker/utils/serialize.ts"),
+			"./action-system/CommandBus": load("src/core/worker/class/action-system/CommandBus.ts"),
+			"./action-system/ModifiersManager": load("src/core/worker/class/action-system/ModifiersManager.ts", common),
+		}),
 		"./class/ChanceCard": {},
 		"@src/core/worker/class/GamePhase": phaseClass,
 		"@src/core/worker/class/GameRuntimeStack": load("src/core/worker/class/GameRuntimeStack.ts"),
@@ -71,6 +77,7 @@ function fixture() {
 	const game = new GameProcess({
 		mapIndex: ["start"], mapItems: [{ id: "start", type: { id: "road" } }], roles: [], chanceCards: [], mapEvents: [],
 		phases: { gameOverRule: [{ id: "rule", initEventCode: "async () => false" }] },
+		...mapOverrides,
 	}, {}, [], "owner");
 	const phase = (name, terminal = false) => ({
 		name,
@@ -122,4 +129,21 @@ test("simultaneous game-over checks issue one final ranking and one termination 
 	f.game.gameOverRuleFunction = async () => true;
 	await Promise.all([f.game.checkGameOver(), f.game.checkGameOver()]);
 	assert.equal(f.messages.filter((message) => message.type === f.workerTypes.WorkerCommType.GameOver).length, 1);
+});
+
+test("worker normalization retains explicit building visual resources without changing property economics", () => {
+	const buildingVisual = { version: 1, collection: "china24-property-models-v1", unownedModelId: "L0" };
+	const buildingModelIdList = ["L1", "L2", "L3", "L4", "L5"];
+	const property = { id: "city", level: 0, maxLevel: 3, sellCost: 1000, buildCost: 100, costList: [10, 20, 30, 40], buildingModelIdList };
+	const f = fixture({ buildingVisual, buildingModelIdList, mapItems: [{ id: "start", type: { id: "road" }, property }] });
+	assert.equal(f.game.mapData.buildingVisual, buildingVisual);
+	assert.equal(f.game.mapData.buildingModelIdList, buildingModelIdList);
+	assert.equal(f.game.mapData.mapItems[0].property, property);
+	assert.equal(property.maxLevel, 3);
+	assert.deepEqual(property.costList, [10, 20, 30, 40]);
+	const synchronizedProperty = f.game.getGameData().properties[0];
+	assert.equal(synchronizedProperty.level, 0);
+	assert.equal(synchronizedProperty.maxLevel, 3);
+	assert.equal(synchronizedProperty.buildingModelIdList, buildingModelIdList);
+	assert.deepEqual(synchronizedProperty.costList, [10, 20, 30, 40]);
 });

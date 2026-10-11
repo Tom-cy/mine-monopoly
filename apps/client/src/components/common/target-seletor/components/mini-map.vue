@@ -2,6 +2,7 @@
 import { MapItem, PlayerInfo, PropertyInfo } from "@mine-monopoly/types";
 import { useGameData, useMapData } from "@src/store/game";
 import { computed, toRaw } from "vue";
+import { isSceneDecoration } from "@src/utils/scene-decoration";
 
 const props = defineProps<{
 	highLightList: string[];
@@ -17,13 +18,14 @@ const gameDataStore = useGameData();
 const properties = gameDataStore.properties;
 const playerList = gameDataStore.players;
 const indexList = mapDataStore.mapIndex;
+const playableMapItems = computed(() => mapDataStore.mapItems.filter((item) => !isSceneDecoration(item.type)));
 
 // 创建 mapItemId -> PropertyInfo 的映射，用于快速查找实时数据
 const propertyMap = computed(() => {
 	const map = new Map<string, PropertyInfo>();
 	for (const prop of properties) {
 		// 通过 mapDataStore 找到对应的 mapItemId
-		const mapItem = mapDataStore.mapItems.find((item) => item.property?.id === prop.id);
+		const mapItem = playableMapItems.value.find((item) => item.property?.id === prop.id);
 		if (mapItem) {
 			map.set(mapItem.id, prop);
 		}
@@ -32,7 +34,7 @@ const propertyMap = computed(() => {
 });
 
 const mapBounds = computed(() => {
-	const items = mapDataStore.mapItems;
+	const items = playableMapItems.value;
 	if (!items.length) return { minX: 0, maxX: 0, minY: 0, maxY: 0, width: 0, height: 0 };
 
 	const xs = items.map((i) => i.x);
@@ -71,7 +73,7 @@ type MapItemWithContext = MapItem & {
 };
 
 const processedMapItems = computed<MapItemWithContext[]>(() => {
-	const rawItems = toRaw(mapDataStore.mapItems);
+	const rawItems = toRaw(playableMapItems.value);
 	if (!rawItems.length) return [];
 
 	const { minX, minY } = mapBounds.value;
