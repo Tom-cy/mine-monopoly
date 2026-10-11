@@ -17,15 +17,15 @@ pnpm --filter @mine-monopoly/client dev
 
 启动前需要运行 Java SIT 服务和 PeerServer。当前默认配置为：
 
-| 用途 | 客户端请求路径 | 开发代理目标 |
-| --- | --- | --- |
-| 玩家 HTTP API | `/monopoly-api` | `https://192.168.1.3:7443` |
-| Peer HTTP / WebSocket | `/monopoly-mine-peer` | `http://127.0.0.1:9003` |
-| 管理后台链接 | — | `http://localhost:7111` |
+| 用途                  | 客户端请求路径        | 开发代理目标               |
+| --------------------- | --------------------- | -------------------------- |
+| 玩家 HTTP API         | `/monopoly-api`       | `https://192.168.1.3:7443` |
+| Peer HTTP / WebSocket | `/monopoly-mine-peer` | `http://127.0.0.1:9003`    |
+| 管理后台链接          | —                     | `http://localhost:7111`    |
 
 Java HTTPS 开发代理用 `VITE_DEV_PROXY_CA_FILE` 指向公开 PEM 证书，默认位置是 `E:/games/GameBackend/tools/dev/classic-wss/local/classic-sit-server.pem`。更换地址或证书后同步修改 `.env.local` 并重启 Vite；证书必须包含后端地址，代理保留证书验证。
 
-PeerServer 在 `GameBackend/modules/monopoly/peer-server` 中启动，使用已有 `start-sit.sh`，或 Windows 下在其目录运行 `pnpm start -- --origin http://localhost:5173`。详细部署参数见该目录 README。Origin 需与浏览器地址完整一致；`127.0.0.1`、局域网 IP 和 `localhost` 是不同 Origin，需要显式加入 PeerServer 的 `--origin` 参数。
+PeerServer 在 `GameBackend/modules/monopoly/peer-server` 中启动，使用已有 `start-sit.sh`，或 Windows 下在其目录运行 `pnpm start --origin http://localhost:5173`。详细部署参数见该目录 README。Origin 需与浏览器地址完整一致；`127.0.0.1`、局域网 IP 和 `localhost` 是不同 Origin，需要显式加入 PeerServer 的 `--origin` 参数。
 
 ## 登录和在线房间
 

@@ -11,6 +11,9 @@ function releaseCropperUrl() {
 }
 onBeforeUnmount(releaseCropperUrl);
 
+let activeRequest: AbortController | null = null;
+onBeforeUnmount(() => activeRequest?.abort());
+
 const isLoading = ref(false);
 const avatarFile = ref<File | undefined>();
 const showCropper = ref(false);
@@ -85,6 +88,7 @@ function resetRegisterForm() {
 }
 
 const handleRegister = async () => {
+	if (isLoading.value) return;
 	isLoading.value = true;
 	if (
 		!(
@@ -113,7 +117,11 @@ const handleRegister = async () => {
 		isLoading.value = false;
 		return;
 	}
-	if (registerForm.password.length < 6 || new TextEncoder().encode(registerForm.password).length > 72 || registerForm.password.includes("\0")) {
+	if (
+		registerForm.password.length < 6 ||
+		new TextEncoder().encode(registerForm.password).length > 72 ||
+		registerForm.password.includes("\0")
+	) {
 		FPMessage({ type: "warning", message: "密码至少6位，UTF-8长度不能超过72字节" });
 		isLoading.value = false;
 		return;
@@ -126,14 +134,17 @@ const handleRegister = async () => {
 			formData.append("username", registerForm.username);
 			formData.append("password", registerForm.password);
 			formData.append("color", registerForm.color);
+			const controller = new AbortController();
+			activeRequest = controller;
 			try {
-				if (await apiRegister(formData)) {
-					loginForm.useraccount = registerForm.useraccount;
+				if (await apiRegister(formData, controller.signal)) {
+					loginForm.useraccount = String(formData.get("useraccount"));
 					resetRegisterForm();
 					loginMode.value = true;
 					FPMessage({ type: "success", message: "注册成功，请登录并选择区服" });
 				}
 			} finally {
+				if (activeRequest === controller) activeRequest = null;
 				isLoading.value = false;
 			}
 		}
@@ -148,6 +159,7 @@ const handleRegister = async () => {
 };
 
 async function handleLogin() {
+	if (isLoading.value) return;
 	isLoading.value = true;
 	if (!(loginForm.useraccount && loginForm.password)) {
 		FPMessage({
@@ -157,13 +169,16 @@ async function handleLogin() {
 		isLoading.value = false;
 		return;
 	}
+	const controller = new AbortController();
+	activeRequest = controller;
 	try {
-		const token = await apiLogin(loginForm.useraccount, loginForm.password);
+		const token = await apiLogin(loginForm.useraccount, loginForm.password, controller.signal);
 		if (token) {
 			loginForm.password = "";
 			emit("success", token);
 		}
 	} finally {
+		if (activeRequest === controller) activeRequest = null;
 		isLoading.value = false;
 	}
 }
@@ -216,13 +231,27 @@ function handleColorClick() {
 			</div>
 			<div class="form-item">
 				<span class="lable">用户名</span>
-				<input autocomplete="off" class="fp-input" type="text" id="username" v-model="registerForm.username" maxlength="20" />
+				<input
+					autocomplete="off"
+					class="fp-input"
+					type="text"
+					id="username"
+					v-model="registerForm.username"
+					maxlength="20"
+				/>
 				<span class="input-tip">最多20个字符</span>
 			</div>
 		</div>
 		<div class="form-item">
 			<span class="lable">账号(用于登录)</span>
-			<input autocomplete="off" class="fp-input" type="text" id="useraccount" v-model="registerForm.useraccount" maxlength="20" />
+			<input
+				autocomplete="off"
+				class="fp-input"
+				type="text"
+				id="useraccount"
+				v-model="registerForm.useraccount"
+				maxlength="20"
+			/>
 			<span class="input-tip">3-20位字母、数字或下划线</span>
 		</div>
 		<div class="form-item">
@@ -243,13 +272,7 @@ function handleColorClick() {
 		<div class="form-item">
 			<span class="lable">代表颜色</span>
 			<div class="color-input-wrapper">
-				<input
-					ref="colorInputRef"
-					type="color"
-					id="color"
-					v-model="registerForm.color"
-					class="color-input-hidden"
-				/>
+				<input ref="colorInputRef" type="color" id="color" v-model="registerForm.color" class="color-input-hidden" />
 				<div class="color-preview" :style="{ backgroundColor: registerForm.color }" @click="handleColorClick">
 					<span class="color-value">{{ registerForm.color }}</span>
 				</div>
@@ -295,7 +318,7 @@ function handleColorClick() {
 		font-size: 0.7rem;
 		color: var(--fp-color-text-secondary);
 		margin-top: -0.1rem;
-		margin-left: .5rem;
+		margin-left: 0.5rem;
 	}
 
 	.color-input-wrapper {

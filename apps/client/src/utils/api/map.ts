@@ -94,8 +94,8 @@ export function rememberFrozenRoomMap(room: {
 	mapId: string;
 	mapName: string;
 	mapVersion: string;
-	mapUrl: string;
-	mapHash: string;
+	mapUrl: string | null;
+	mapHash: string | null;
 }): void {
 	if (!room.mapUrl || !room.mapHash) throw new Error("服务器缺少房间冻结地图资源，请更新服务后重试");
 	frozenMaps.set(room.id, {

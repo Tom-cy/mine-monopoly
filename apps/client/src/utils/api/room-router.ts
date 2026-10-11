@@ -20,8 +20,8 @@ export interface RoomVO {
 	mapId: string;
 	mapName: string;
 	mapVersion: string;
-	mapUrl: string;
-	mapHash: string;
+	mapUrl: string | null;
+	mapHash: string | null;
 	createdTime: number;
 	leaseExpiresAt: number;
 	heartbeatIntervalMs: number;

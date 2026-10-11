@@ -30,7 +30,14 @@ import {
 	MapTransferRequestData,
 } from "@mine-monopoly/types";
 import { WorkerCommType, WorkerState } from "@src/enums/worker";
-import { WorkerCommMsg, HeartbeatData, WorkerStateChangedData, GMAction, GMActionResponseData, GameProcessDebugState } from "@src/interfaces/worker";
+import {
+	WorkerCommMsg,
+	HeartbeatData,
+	WorkerStateChangedData,
+	GMAction,
+	GMActionResponseData,
+	GameProcessDebugState,
+} from "@src/interfaces/worker";
 import { useLoading, useDeviceStatus, useSettig } from "@src/store";
 import { randomString } from "@src/utils";
 import { getFrozenRoomMap } from "@src/utils/api/map";
@@ -44,8 +51,15 @@ import logService, { ErrorCategory, logWorkerError, logErrorWithOptions } from "
 import { OperateListener } from "../worker/class/OperateListener";
 import { base64ToArrayBuffer } from "@mine-monopoly/utils";
 import { SaveManager, SaveRecord, SaveSnapshot } from "@src/core/save";
-import { createAIDecisionProviderFromConfig, createRemoteAIDecisionProvider } from "@src/core/ai/OpenAICompatibleDecisionProvider";
-import { normalizeAIDecisionConfig, normalizeAIDecisionMode, normalizeRemoteLLMConfig } from "@src/core/ai/ai-decision-config";
+import {
+	createAIDecisionProviderFromConfig,
+	createRemoteAIDecisionProvider,
+} from "@src/core/ai/OpenAICompatibleDecisionProvider";
+import {
+	normalizeAIDecisionConfig,
+	normalizeAIDecisionMode,
+	normalizeRemoteLLMConfig,
+} from "@src/core/ai/ai-decision-config";
 
 interface UserInRoom extends UserInRoomInfo {
 	socketClient: DataConnection;
@@ -98,7 +112,10 @@ export class Room {
 	private saveManager: SaveManager = new SaveManager();
 	private pendingSaveData: { snapshot: any; aiPlayerIds: string[] } | null = null;
 	/** GM 操作响应处理 Map */
-	private pendingGMResponses = new Map<string, { resolve: (value: GMActionResponseData) => void, timeout: ReturnType<typeof setTimeout> }>();
+	private pendingGMResponses = new Map<
+		string,
+		{ resolve: (value: GMActionResponseData) => void; timeout: ReturnType<typeof setTimeout> }
+	>();
 	private pendingDebugStateResolvers = new Set<{
 		resolve: (value: GameProcessDebugState | null) => void;
 		timeout: ReturnType<typeof setTimeout>;
@@ -252,7 +269,9 @@ export class Room {
 		if (!user) return { success: false, error: "本地玩家不存在" };
 		const nextName = username.trim();
 		if (!nextName) return { success: false, error: "玩家名称不能为空" };
-		const duplicated = Array.from(this.userList.values()).some((item) => item.userId !== userId && item.username.trim() === nextName);
+		const duplicated = Array.from(this.userList.values()).some(
+			(item) => item.userId !== userId && item.username.trim() === nextName,
+		);
 		if (duplicated) return { success: false, error: "玩家名称不能重复" };
 		user.username = nextName;
 		this.roomInfoBroadcast();
@@ -341,7 +360,9 @@ export class Room {
 	}
 
 	public randomizeAiRoles(targetUserId?: string): boolean {
-		const targets = targetUserId ? [this.aiUserList.get(targetUserId)].filter(Boolean) : Array.from(this.aiUserList.values());
+		const targets = targetUserId
+			? [this.aiUserList.get(targetUserId)].filter(Boolean)
+			: Array.from(this.aiUserList.values());
 		if (targets.length === 0) return false;
 		for (const aiUser of targets) {
 			if (!this.assignRandomRoleToAiUser(aiUser!)) {
@@ -435,7 +456,11 @@ export class Room {
 	}
 
 	private getUserNameById(userId: string): string {
-		return this.userList.get(userId)?.username ?? this.aiUserList.get(userId)?.username ?? `Player-${userId.slice(0, 4)}`;
+		return (
+			this.userList.get(userId)?.username ??
+			this.aiUserList.get(userId)?.username ??
+			`Player-${userId.slice(0, 4)}`
+		);
 	}
 
 	private abbreviateAIChatText(text: string | undefined, maxLength: number): string {
@@ -505,7 +530,9 @@ export class Room {
 
 	private isGenericAIChatText(text: string): boolean {
 		const compact = text.replace(/[「」"'`，。！？、,.!?：:\s]/g, "");
-		return ["确认", "取消", "提交", "使用", "继续", "选择", "选项", "目标", "确认操作", "选择目标"].includes(compact);
+		return ["确认", "取消", "提交", "使用", "继续", "选择", "选项", "目标", "确认操作", "选择目标"].includes(
+			compact,
+		);
 	}
 
 	private isTechnicalAIChatText(text: string): boolean {
@@ -530,9 +557,23 @@ export class Room {
 		return normalized;
 	}
 
-	private extractReadableAIPayloadText(payload?: Record<string, unknown>, maxLength: number = 28): string | undefined {
+	private extractReadableAIPayloadText(
+		payload?: Record<string, unknown>,
+		maxLength: number = 28,
+	): string | undefined {
 		if (!payload) return undefined;
-		const candidateKeys = ["name", "title", "label", "text", "displayName", "cardName", "playerName", "propertyName", "targetName", "buttonText"];
+		const candidateKeys = [
+			"name",
+			"title",
+			"label",
+			"text",
+			"displayName",
+			"cardName",
+			"playerName",
+			"propertyName",
+			"targetName",
+			"buttonText",
+		];
 		for (const key of candidateKeys) {
 			const value = payload[key];
 			if (typeof value !== "string") continue;
@@ -542,7 +583,11 @@ export class Room {
 		return undefined;
 	}
 
-	private getReadableAIOptionText(request: AIDecisionRequest, optionId: string, maxLength: number = 28): string | undefined {
+	private getReadableAIOptionText(
+		request: AIDecisionRequest,
+		optionId: string,
+		maxLength: number = 28,
+	): string | undefined {
 		const option = request.options.find((item) => item.id === optionId);
 		if (!option) return undefined;
 
@@ -563,7 +608,16 @@ export class Room {
 		return undefined;
 	}
 
-	private formatAIDecisionResult(request: AIDecisionRequest, selection: { optionId?: string; optionIds?: string[]; submitted?: boolean; fieldValues?: Record<string, unknown>; reason?: string }): string {
+	private formatAIDecisionResult(
+		request: AIDecisionRequest,
+		selection: {
+			optionId?: string;
+			optionIds?: string[];
+			submitted?: boolean;
+			fieldValues?: Record<string, unknown>;
+			reason?: string;
+		},
+	): string {
 		const reasonText = this.humanizeAIReason(selection.reason);
 		const withReason = (base: string) => (reasonText ? `${base}，${reasonText}。` : `${base}。`);
 
@@ -572,22 +626,46 @@ export class Room {
 			switch (request.scene) {
 				case "confirm-dialog":
 					return label
-						? withReason(this.pickAIChatLine([`这步我准备 ${label}`, `这手我决定 ${label}`, `我先按 ${label} 来`]))
+						? withReason(
+								this.pickAIChatLine([
+									`这步我准备 ${label}`,
+									`这手我决定 ${label}`,
+									`我先按 ${label} 来`,
+								]),
+							)
 						: withReason(this.pickAIChatLine(["这步我就这么定了", "这手我准备直接上", "我先按这个思路走"]));
 				case "target-select":
 					return label
-						? withReason(this.pickAIChatLine([`我盯上 ${label} 了`, `这步先找 ${label}`, `目标就定 ${label} 吧`]))
-						: withReason(this.pickAIChatLine(["这步先挑个顺手的目标", "我先找个合适的目标", "这手先锁一个目标"]));
+						? withReason(
+								this.pickAIChatLine([
+									`我盯上 ${label} 了`,
+									`这步先找 ${label}`,
+									`目标就定 ${label} 吧`,
+								]),
+							)
+						: withReason(
+								this.pickAIChatLine(["这步先挑个顺手的目标", "我先找个合适的目标", "这手先锁一个目标"]),
+							);
 				case "item-select":
 					return label
-						? withReason(this.pickAIChatLine([`这步我拿 ${label}`, `先选 ${label} 试试`, `我更倾向 ${label}`]))
+						? withReason(
+								this.pickAIChatLine([`这步我拿 ${label}`, `先选 ${label} 试试`, `我更倾向 ${label}`]),
+							)
 						: withReason(this.pickAIChatLine(["这步我先拿一个更稳的", "我先挑个顺手的", "这手先选这个"]));
 				case "active-action":
 				case "scripted-action":
 				default:
 					return label
-						? withReason(this.pickAIChatLine([`我这步准备用 ${label}`, `先按 ${label} 来`, `这手我打算走 ${label}`]))
-						: withReason(this.pickAIChatLine(["我这步先稳着来", "这手先走个顺的", "我先按现在这个思路处理"]));
+						? withReason(
+								this.pickAIChatLine([
+									`我这步准备用 ${label}`,
+									`先按 ${label} 来`,
+									`这手我打算走 ${label}`,
+								]),
+							)
+						: withReason(
+								this.pickAIChatLine(["我这步先稳着来", "这手先走个顺的", "我先按现在这个思路处理"]),
+							);
 			}
 		}
 
@@ -597,7 +675,13 @@ export class Room {
 				.filter(Boolean)
 				.join("、");
 			return labels
-				? withReason(this.pickAIChatLine([`这几个我都要：${labels}`, `我先拿这几项：${labels}`, `我这步会选 ${labels}`]))
+				? withReason(
+						this.pickAIChatLine([
+							`这几个我都要：${labels}`,
+							`我先拿这几项：${labels}`,
+							`我这步会选 ${labels}`,
+						]),
+					)
 				: withReason(this.pickAIChatLine(["这几个我先一起收下", "这手我会多拿几项", "我先把这几项一起处理"]));
 		}
 
@@ -871,8 +955,11 @@ export class Room {
 		const oldUser = this.userList.get(userId);
 		if (oldUser) oldUser.socketClient = newCoon;
 		if (oldUser && this.mapInfo) {
-			const isCurrent = () => !this.disposed && this.userList.get(userId) === oldUser &&
-				oldUser.socketClient === newCoon && newCoon.open;
+			const isCurrent = () =>
+				!this.disposed &&
+				this.userList.get(userId) === oldUser &&
+				oldUser.socketClient === newCoon &&
+				newCoon.open;
 			this.roomInfoBroadcast();
 
 			// 重连后重新发布当前地图描述或服务器地图。
@@ -882,7 +969,9 @@ export class Room {
 			try {
 				await Promise.race([
 					this.operationListener.onceAsync(userId, OperateType.MapResourceLoaded),
-					new Promise((_, reject) => setTimeout(() => reject(new Error("地图资源加载超时")), this.TRANSFER_TIMEOUT)),
+					new Promise((_, reject) =>
+						setTimeout(() => reject(new Error("地图资源加载超时")), this.TRANSFER_TIMEOUT),
+					),
 				]);
 			} catch (error) {
 				if (!isCurrent()) return;
@@ -918,8 +1007,12 @@ export class Room {
 		if (!this.localParty) {
 			const frozenMap = getFrozenRoomMap(this.roomId);
 			if (!frozenMap || data.from !== "server" || data.data !== frozenMap.id) {
-				this.roomBroadcast({ type: SocketMsgType.MsgNotify, source: SocketMsgSource.Server,
-					data: undefined, msg: { type: "warning", content: "在线房间使用创建时冻结的地图版本，换图请新建房间" } });
+				this.roomBroadcast({
+					type: SocketMsgType.MsgNotify,
+					source: SocketMsgSource.Server,
+					data: undefined,
+					msg: { type: "warning", content: "在线房间使用创建时冻结的地图版本，换图请新建房间" },
+				});
 				return;
 			}
 		}
@@ -939,7 +1032,7 @@ export class Room {
 				data: { show: true, text: "地图加载中..." },
 			});
 			sendChangeMapMessage();
-		} else if ((data.from === "custom")) {
+		} else if (data.from === "custom") {
 			data.descriptor = await this.createCustomMapDescriptor(data);
 			this.customMapLoadStates.clear();
 			this.legacyCustomMapClients.clear();
@@ -1153,7 +1246,9 @@ export class Room {
 		};
 	}
 
-	private normalizeAIPlayerDecisionBinding(binding: Partial<AIPlayerDecisionBinding> | undefined): AIPlayerDecisionBinding {
+	private normalizeAIPlayerDecisionBinding(
+		binding: Partial<AIPlayerDecisionBinding> | undefined,
+	): AIPlayerDecisionBinding {
 		return {
 			mode: normalizeAIDecisionMode(binding?.mode),
 			remoteProfileId:
@@ -1215,7 +1310,11 @@ export class Room {
 			this.roomInfoBroadcast();
 			return;
 		}
-		if (!this.getAllRoomUsers().every((item) => item.isSpectator || item.userId === this.ownerId || item.isAI || item.isReady)) {
+		if (
+			!this.getAllRoomUsers().every(
+				(item) => item.isSpectator || item.userId === this.ownerId || item.isAI || item.isReady,
+			)
+		) {
 			this.roomBroadcast({
 				type: SocketMsgType.MsgNotify,
 				source: SocketMsgSource.Server,
@@ -1229,8 +1328,12 @@ export class Room {
 		try {
 			await this.beforeStart?.();
 		} catch {
-			this.roomBroadcast({ type: SocketMsgType.MsgNotify, source: SocketMsgSource.Server,
-				data: undefined, msg: { type: "error", content: "成员连接校验或房主租约未就绪，无法开始游戏" } });
+			this.roomBroadcast({
+				type: SocketMsgType.MsgNotify,
+				source: SocketMsgSource.Server,
+				data: undefined,
+				msg: { type: "error", content: "成员连接校验或房主租约未就绪，无法开始游戏" },
+			});
 			return;
 		} finally {
 			this.startPending = false;
@@ -1274,18 +1377,18 @@ export class Room {
 			this.gameProcessWorker && this.gameProcessWorker.terminate();
 		});
 
-	// DevTools debug bridge
-	(window as any).__gpBridge = {
-		requestState: () => {
-			if (this.gameProcessWorker) {
-				this.gameProcessWorker.postMessage({
-					type: WorkerCommType.DebugGetState,
-					data: undefined,
-				});
-			}
-		},
-		onState: null as ((state: any) => void) | null,
-	};
+		// DevTools debug bridge
+		(window as any).__gpBridge = {
+			requestState: () => {
+				if (this.gameProcessWorker) {
+					this.gameProcessWorker.postMessage({
+						type: WorkerCommType.DebugGetState,
+						data: undefined,
+					});
+				}
+			},
+			onState: null as ((state: any) => void) | null,
+		};
 	}
 	private async handleGameOver() {
 		// The server admission lifecycle stays started; existing players may replay locally.
@@ -1319,9 +1422,15 @@ export class Room {
 		return this.userList.has(userId);
 	}
 
-	public emitOperation<T extends OperateType>(userId: string, operateType: T, data?: PlayerOperationResult[T], metadata?: import("@src/interfaces/worker").InitOperationMeta) {
+	public emitOperation<T extends OperateType>(
+		userId: string,
+		operateType: T,
+		data?: PlayerOperationResult[T],
+		metadata?: import("@src/interfaces/worker").InitOperationMeta,
+	) {
 		this.operationListener.emit(userId, operateType, data);
-		if (operateType === OperateType.GameInitFinished && metadata?.initStatus === "failed") this.handleUserOffline(userId);
+		if (operateType === OperateType.GameInitFinished && metadata?.initStatus === "failed")
+			this.handleUserOffline(userId);
 		if (!this.gameProcessWorker) return;
 		this.gameProcessWorker.postMessage(<WorkerCommMsg>{
 			type: WorkerCommType.EmitOperation,
@@ -1402,7 +1511,12 @@ export class Room {
 	 * 新协议包格式: [1 字节 type][1 字节 session 长度][session UTF-8][4 字节 chunkIndex 大端序][chunk 原始字节]。
 	 * 为兼容旧客户端，回退传输仍使用旧格式: [1 字节 type][4 字节 chunkIndex 大端序][chunk 原始字节]。
 	 */
-	private sendChunk(user: UserInRoom, mapLoadSessionId: string | undefined, chunkIndex: number, chunk: Uint8Array): void {
+	private sendChunk(
+		user: UserInRoom,
+		mapLoadSessionId: string | undefined,
+		chunkIndex: number,
+		chunk: Uint8Array,
+	): void {
 		if (!mapLoadSessionId) {
 			const packet = new Uint8Array(5 + chunk.length);
 			packet[0] = MAP_CHUNK_BIN_TYPE;
@@ -1438,7 +1552,9 @@ export class Room {
 	 * DataChannel 为 reliable + ordered（SCTP 层保证丢包重传与有序投递），
 	 * MapChunkEnd 必然在所有块之后到达客机端，无需应用层 ACK/重传。
 	 */
-	private async createCustomMapDescriptor(mapInfo: Extract<RoomMapInfo, { from: "custom" }>): Promise<CustomMapDescriptor> {
+	private async createCustomMapDescriptor(
+		mapInfo: Extract<RoomMapInfo, { from: "custom" }>,
+	): Promise<CustomMapDescriptor> {
 		const raw = typeof mapInfo.data === "string" ? new Uint8Array(base64ToArrayBuffer(mapInfo.data)) : mapInfo.data;
 		const rawBuffer = raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer;
 		const digest = await crypto.subtle.digest("SHA-256", rawBuffer);
@@ -1485,7 +1601,12 @@ export class Room {
 
 	public handleMapLocalCheck(clientId: string, data: MapLocalCheckData): void {
 		const descriptor = this.mapInfo?.from === "custom" ? this.mapInfo.descriptor : undefined;
-		if (!descriptor || descriptor.mapLoadSessionId !== data.mapLoadSessionId || descriptor.fileSha256 !== data.fileSha256) return;
+		if (
+			!descriptor ||
+			descriptor.mapLoadSessionId !== data.mapLoadSessionId ||
+			descriptor.fileSha256 !== data.fileSha256
+		)
+			return;
 		let statuses = this.customMapLoadStates.get(data.mapLoadSessionId);
 		if (!statuses) {
 			statuses = new Map();
@@ -1499,24 +1620,30 @@ export class Room {
 	public handleMapTransferRequest(clientId: string, data: MapTransferRequestData): void {
 		const mapInfo = this.mapInfo;
 		if (
-			mapInfo?.from !== "custom"
-			|| !mapInfo.descriptor
-			|| mapInfo.descriptor.mapLoadSessionId !== data.mapLoadSessionId
-			|| mapInfo.descriptor.fileSha256 !== data.fileSha256
-		) return;
+			mapInfo?.from !== "custom" ||
+			!mapInfo.descriptor ||
+			mapInfo.descriptor.mapLoadSessionId !== data.mapLoadSessionId ||
+			mapInfo.descriptor.fileSha256 !== data.fileSha256
+		)
+			return;
 		this.legacyCustomMapClients.delete(clientId);
 		this.clearMapTransferFallback(clientId);
 		this.startMapChunkTransfer(clientId, mapInfo);
 	}
 
-	public handleMapResourceLoaded(clientId: string, mapLoadSessionId: unknown, extra: import("@src/interfaces/worker").InitOperationMeta | undefined): boolean {
+	public handleMapResourceLoaded(
+		clientId: string,
+		mapLoadSessionId: unknown,
+		extra: import("@src/interfaces/worker").InitOperationMeta | undefined,
+	): boolean {
 		const descriptor = this.mapInfo?.from === "custom" ? this.mapInfo.descriptor : undefined;
 		const legacySessionId = this.legacyCustomMapClients.get(clientId);
 		if (
-			descriptor
-			&& mapLoadSessionId !== descriptor.mapLoadSessionId
-			&& (mapLoadSessionId !== undefined || legacySessionId !== descriptor.mapLoadSessionId)
-		) return false;
+			descriptor &&
+			mapLoadSessionId !== descriptor.mapLoadSessionId &&
+			(mapLoadSessionId !== undefined || legacySessionId !== descriptor.mapLoadSessionId)
+		)
+			return false;
 		this.legacyCustomMapClients.delete(clientId);
 		this.emitOperation(clientId, OperateType.MapResourceLoaded, undefined, extra);
 		return true;
@@ -1545,18 +1672,14 @@ export class Room {
 		const mapLoadSessionId = useLegacyProtocol ? undefined : mapInfo.descriptor?.mapLoadSessionId;
 
 		// 发送 MapChunkStart（附带动态整体超时与总大小，供客机端兜底/展示进度）
-		this.sendToClient(
-			user.socketClient,
-			SocketMsgType.MapChunkStart,
-			{
-				mapLoadSessionId,
-				totalChunks: chunks.length,
-				chunkSize: this.CHUNK_SIZE,
-				mapInfo: { from: "custom" as const },
-				transferTimeout: this.calcTransferTimeout(chunks.length),
-				totalBytes: raw.byteLength,
-			},
-		);
+		this.sendToClient(user.socketClient, SocketMsgType.MapChunkStart, {
+			mapLoadSessionId,
+			totalChunks: chunks.length,
+			chunkSize: this.CHUNK_SIZE,
+			mapInfo: { from: "custom" as const },
+			transferTimeout: this.calcTransferTimeout(chunks.length),
+			totalBytes: raw.byteLength,
+		});
 
 		// 流水线：按序发送所有块
 		for (let i = 0; i < chunks.length; i++) {
@@ -1564,11 +1687,7 @@ export class Room {
 		}
 
 		// MapChunkEnd 在所有块之后发送，DataChannel 有序投递保证其最后到达
-		this.sendToClient(
-			user.socketClient,
-			SocketMsgType.MapChunkEnd,
-			{ success: true, mapLoadSessionId },
-		);
+		this.sendToClient(user.socketClient, SocketMsgType.MapChunkEnd, { success: true, mapLoadSessionId });
 	}
 
 	public requestSave(): void {
@@ -1579,7 +1698,10 @@ export class Room {
 		});
 	}
 
-	public async loadSave(record: SaveRecord, usePrevious: boolean = false): Promise<{ success: boolean; error?: string }> {
+	public async loadSave(
+		record: SaveRecord,
+		usePrevious: boolean = false,
+	): Promise<{ success: boolean; error?: string }> {
 		if (!this.mapInfo) return { success: false, error: "请先加载与存档匹配的地图" };
 		const snapshot = usePrevious ? record.previousSnapshot : record.snapshot;
 		if (!snapshot) return { success: false, error: "没有可用的存档数据" };
@@ -1679,9 +1801,7 @@ export class Room {
 		this.clearHeartbeatTimer();
 
 		// 根据游戏状态选择超时时间
-		const timeout = this.lastKnownGameState?.isBusy
-			? Room.HEARTBEAT_BUSY_TIMEOUT
-			: Room.HEARTBEAT_NORMAL_TIMEOUT;
+		const timeout = this.lastKnownGameState?.isBusy ? Room.HEARTBEAT_BUSY_TIMEOUT : Room.HEARTBEAT_NORMAL_TIMEOUT;
 
 		this.heartbeatTimeout = window.setTimeout(() => {
 			this.handleWorkerCrashed("心跳超时");
@@ -1850,142 +1970,144 @@ export class Room {
 
 	// ==================== Worker 消息处理器 ====================
 
-		/**
-		 * 处理 Worker 状态变化消息
-		 */
-		private handleWorkerStateChanged(data: WorkerStateChangedData): void {
-			const { previousState, currentState, reason } = data;
-			this.workerState = currentState;
+	/**
+	 * 处理 Worker 状态变化消息
+	 */
+	private handleWorkerStateChanged(data: WorkerStateChangedData): void {
+		const { previousState, currentState, reason } = data;
+		this.workerState = currentState;
 
-			logService.info({
-				category: ErrorCategory.WORKER,
-				type: "StateChangeReceived",
-				message: `收到Worker状态变化: ${previousState} -> ${currentState}`,
-				info: reason,
-			});
+		logService.info({
+			category: ErrorCategory.WORKER,
+			type: "StateChangeReceived",
+			message: `收到Worker状态变化: ${previousState} -> ${currentState}`,
+			info: reason,
+		});
 
-			// 如果进入安全模式，记录原因
-			if (currentState === WorkerState.SafeMode && reason) {
-				this.safeModeReason = reason;
-			}
-
-			// 如果进入运行状态，启动心跳监控
-			if (currentState === WorkerState.Running) {
-				this.startHeartbeatMonitor();
-			}
+		// 如果进入安全模式，记录原因
+		if (currentState === WorkerState.SafeMode && reason) {
+			this.safeModeReason = reason;
 		}
 
-		/**
-		 * 处理组件验证错误消息
-		 */
-		private handleValidationError(errors: Array<{
+		// 如果进入运行状态，启动心跳监控
+		if (currentState === WorkerState.Running) {
+			this.startHeartbeatMonitor();
+		}
+	}
+
+	/**
+	 * 处理组件验证错误消息
+	 */
+	private handleValidationError(
+		errors: Array<{
 			componentType: string;
 			componentId: string;
 			componentName: string;
 			errorType: string;
 			errorMessage: string;
-		}>): void {
-			logErrorWithOptions({
-				category: ErrorCategory.COMPONENT_VALIDATION,
-				type: "ComponentValidationError",
-				message: `组件验证错误: ${errors.length} 个错误`,
-				extraInfo: { errors },
-			});
+		}>,
+	): void {
+		logErrorWithOptions({
+			category: ErrorCategory.COMPONENT_VALIDATION,
+			type: "ComponentValidationError",
+			message: `组件验证错误: ${errors.length} 个错误`,
+			extraInfo: { errors },
+		});
 
-			// 通知用户
-			const errorMessages = errors.map(e => `${e.componentName}: ${e.errorMessage}`).join("\n");
-			FPMessage({
-				type: "error",
-				message: `地图组件验证失败:\n${errorMessages}`,
-			});
-		}
+		// 通知用户
+		const errorMessages = errors.map((e) => `${e.componentName}: ${e.errorMessage}`).join("\n");
+		FPMessage({
+			type: "error",
+			message: `地图组件验证失败:\n${errorMessages}`,
+		});
+	}
 
-		/**
-		 * 处理详细错误消息
-		 */
-		private handleDetailedError(data: {
-			category: string;
-			type: string;
-			component?: string;
+	/**
+	 * 处理详细错误消息
+	 */
+	private handleDetailedError(data: {
+		category: string;
+		type: string;
+		component?: string;
+		message: string;
+		technical?: {
 			message: string;
-			technical?: {
-				message: string;
-				stack?: string;
-				mapInfo?: any;
-			};
-		}): void {
-			logErrorWithOptions({
-				category: ErrorCategory.WORKER,
-				type: data.type,
-				message: data.message,
-				error: data.technical?.stack
-					? ({ message: data.technical.message, stack: data.technical.stack } as Error)
-					: undefined,
-				extraInfo: {
-					technical: data.technical,
-				},
-			});
+			stack?: string;
+			mapInfo?: any;
+		};
+	}): void {
+		logErrorWithOptions({
+			category: ErrorCategory.WORKER,
+			type: data.type,
+			message: data.message,
+			error: data.technical?.stack
+				? ({ message: data.technical.message, stack: data.technical.stack } as Error)
+				: undefined,
+			extraInfo: {
+				technical: data.technical,
+			},
+		});
 
-			// 通知用户
-			FPMessage({
-				type: "error",
-				message: `游戏错误: ${data.message}\n日志已记录，请查看日志面板`,
-			});
-		}
+		// 通知用户
+		FPMessage({
+			type: "error",
+			message: `游戏错误: ${data.message}\n日志已记录，请查看日志面板`,
+		});
+	}
 
-		/**
-		 * 处理进入安全模式消息
-		 */
-		private handleEnterSafeMode(data: { reason?: string }): void {
-			const reason = data.reason || "未知原因";
-			this.transitionTo(WorkerState.SafeMode, reason);
+	/**
+	 * 处理进入安全模式消息
+	 */
+	private handleEnterSafeMode(data: { reason?: string }): void {
+		const reason = data.reason || "未知原因";
+		this.transitionTo(WorkerState.SafeMode, reason);
 
-			logService.warn({
-				category: ErrorCategory.WORKER,
-				type: "EnterSafeMode",
-				message: `Worker进入安全模式: ${reason}`,
-			});
+		logService.warn({
+			category: ErrorCategory.WORKER,
+			type: "EnterSafeMode",
+			message: `Worker进入安全模式: ${reason}`,
+		});
 
-			// 通知用户
-			FPMessage({
-				type: "warning",
-				message: `进程遇到错误: ${reason}`,
-			});
-		}
+		// 通知用户
+		FPMessage({
+			type: "warning",
+			message: `进程遇到错误: ${reason}`,
+		});
+	}
 
-		/**
-		 * 处理退出安全模式消息
-		 */
-		private handleExitSafeMode(): void {
-			this.transitionTo(WorkerState.Ready, "退出安全模式");
-			this.safeModeReason = "";
+	/**
+	 * 处理退出安全模式消息
+	 */
+	private handleExitSafeMode(): void {
+		this.transitionTo(WorkerState.Ready, "退出安全模式");
+		this.safeModeReason = "";
 
-			logService.info({
-				category: ErrorCategory.WORKER,
-				type: "ExitSafeMode",
-				message: "Worker退出安全模式",
-			});
+		logService.info({
+			category: ErrorCategory.WORKER,
+			type: "ExitSafeMode",
+			message: "Worker退出安全模式",
+		});
 
-			// 通知用户
-			FPMessage({
-				type: "success",
-				message: "游戏已恢复正常模式",
-			});
-		}
+		// 通知用户
+		FPMessage({
+			type: "success",
+			message: "游戏已恢复正常模式",
+		});
+	}
 
-		/**
-		 * 处理从安全模式重试消息
-		 */
-		private handleRetryFromSafeMode(): void {
-			logService.info({
-				category: ErrorCategory.WORKER,
-				type: "RetryFromSafeMode",
-				message: "Worker从安全模式重试",
-			});
+	/**
+	 * 处理从安全模式重试消息
+	 */
+	private handleRetryFromSafeMode(): void {
+		logService.info({
+			category: ErrorCategory.WORKER,
+			type: "RetryFromSafeMode",
+			message: "Worker从安全模式重试",
+		});
 
-			// 重试时先转换到 Ready 状态
-			this.transitionTo(WorkerState.Ready, "从安全模式重试");
-		}
+		// 重试时先转换到 Ready 状态
+		this.transitionTo(WorkerState.Ready, "从安全模式重试");
+	}
 
 	// ==================== 安全模式相关方法 ====================
 
@@ -2034,32 +2156,32 @@ export class Room {
 
 		// 记录详细错误
 		logWorkerError({
-				message: `进程遇到错误: ${reason}`,
-				type: "EnterSafeMode",
-				workerState: this.workerState,
-				extraInfo: technicalDetails,
-			});
-
+			message: `进程遇到错误: ${reason}`,
+			type: "EnterSafeMode",
+			workerState: this.workerState,
+			extraInfo: technicalDetails,
+		});
 
 		// 判断是否可以保存：只有当游戏进行了至少一回合时才有实际进度
 		const canSave = (this.lastKnownGameState?.currentRound ?? 0) > 0;
 
-
 		// 向房主发送选项提示
 		this.roomBroadcast({
-				type: SocketMsgType.SafeModePanel,
-				source: SocketMsgSource.Server,
-				data: {
-					reason: this.formatUserFriendlyReason(reason),
-					canSave: canSave,
-					errorDetails: technicalDetails ? {
-						category: technicalDetails.category,
-						type: technicalDetails.type,
-						message: technicalDetails.message,
-						stack: technicalDetails.stack,
-					} : undefined,
-				},
-			});
+			type: SocketMsgType.SafeModePanel,
+			source: SocketMsgSource.Server,
+			data: {
+				reason: this.formatUserFriendlyReason(reason),
+				canSave: canSave,
+				errorDetails: technicalDetails
+					? {
+							category: technicalDetails.category,
+							type: technicalDetails.type,
+							message: technicalDetails.message,
+							stack: technicalDetails.stack,
+						}
+					: undefined,
+			},
+		});
 
 		// 重置标志
 		this.enteringSafeMode = false;
@@ -2072,12 +2194,12 @@ export class Room {
 	 */
 	private formatUserFriendlyReason(reason: string): string {
 		const reasonMap: Record<string, string> = {
-			"地图验证失败": "地图数据存在问题，可能缺少必需组件或数据格式错误",
-			"组件初始化失败": "游戏组件加载失败，请检查地图配置",
-			"脚本执行错误": "游戏脚本运行时发生错误",
-			"心跳超时": "游戏进程无响应",
-			"初始化超时": "游戏启动超时",
-			"Worker崩溃": "游戏进程意外终止",
+			地图验证失败: "地图数据存在问题，可能缺少必需组件或数据格式错误",
+			组件初始化失败: "游戏组件加载失败，请检查地图配置",
+			脚本执行错误: "游戏脚本运行时发生错误",
+			心跳超时: "游戏进程无响应",
+			初始化超时: "游戏启动超时",
+			Worker崩溃: "游戏进程意外终止",
 		};
 
 		return reasonMap[reason] || reason;
@@ -2090,14 +2212,9 @@ export class Room {
 	 */
 	private canRetryFromSafeMode(reason: string): boolean {
 		// 以下情况允许重试
-		const retryableReasons = [
-			"地图验证失败",
-			"组件初始化失败",
-			"脚本执行错误",
-			"心跳超时",
-		];
+		const retryableReasons = ["地图验证失败", "组件初始化失败", "脚本执行错误", "心跳超时"];
 
-		return retryableReasons.some(r => reason.includes(r));
+		return retryableReasons.some((r) => reason.includes(r));
 	}
 
 	/**
@@ -2137,19 +2254,18 @@ export class Room {
 		});
 
 		// 监听房主选择
-		this.operationListener.onceAsync(this.ownerId, OperateType.ConfirmDialogResult)
-			.then((result) => {
-				logService.info({
-					category: ErrorCategory.WORKER,
-					type: "SafeModeUserChoice",
-					message: `房主选择: confirm=${result.confirm}, canRetry=${canRetry}`,
-				});
-				if (result.confirm && canRetry) {
-					this.retryFromSafeMode();
-				} else {
-					this.abandonGame();
-				}
+		this.operationListener.onceAsync(this.ownerId, OperateType.ConfirmDialogResult).then((result) => {
+			logService.info({
+				category: ErrorCategory.WORKER,
+				type: "SafeModeUserChoice",
+				message: `房主选择: confirm=${result.confirm}, canRetry=${canRetry}`,
 			});
+			if (result.confirm && canRetry) {
+				this.retryFromSafeMode();
+			} else {
+				this.abandonGame();
+			}
+		});
 	}
 
 	/**
@@ -2305,11 +2421,10 @@ export class Room {
 			});
 
 			// 4. 等待一段时间让玩家看到消息
-			await new Promise(resolve => setTimeout(resolve, 2000));
+			await new Promise((resolve) => setTimeout(resolve, 2000));
 
 			// 5. 结束游戏，返回房间
 			this.endGameAndReturnToRoom();
-
 		} catch (e: any) {
 			// 确保重置标志位
 			this.isManuallyRequestingSnapshot = false;
@@ -2482,8 +2597,11 @@ export class Room {
 						const mapVersion = useMapData().info?.version ?? "0.0.0";
 						const mapName = useMapData().info?.name ?? "未知地图";
 						// 获取玩家名字列表
-						const playerNames = Object.keys(snapshot.playerSnapshots).map((userId) => this.getUserNameById(userId));
-						this.saveManager.save(snapshot, mapId, mapVersion, mapName, playerNames)
+						const playerNames = Object.keys(snapshot.playerSnapshots).map((userId) =>
+							this.getUserNameById(userId),
+						);
+						this.saveManager
+							.save(snapshot, mapId, mapVersion, mapName, playerNames)
 							.then(() => {
 								FPMessage({ type: "success", message: "存档成功！" });
 							})
@@ -2531,13 +2649,13 @@ export class Room {
 	}): void {
 		console.error("[GameProcess Worker Error]:", errorData);
 
-			logWorkerError({
-				message: errorData.message,
-				type: errorData.type,
-				error: errorData.stack ? { message: errorData.message, stack: errorData.stack } as Error : undefined,
-				workerState: this.workerState,
-				extraInfo: { info: errorData.info },
-			});
+		logWorkerError({
+			message: errorData.message,
+			type: errorData.type,
+			error: errorData.stack ? ({ message: errorData.message, stack: errorData.stack } as Error) : undefined,
+			workerState: this.workerState,
+			extraInfo: { info: errorData.info },
+		});
 
 		// 进入安全模式
 		this.enterSafeMode(errorData.message, {
@@ -2663,10 +2781,7 @@ export class Room {
 		}
 	}
 
-	private handleSendToUsersInternal(data: {
-		userIdList: string[];
-		data: ServerSocketMessage;
-	}): void {
+	private handleSendToUsersInternal(data: { userIdList: string[]; data: ServerSocketMessage }): void {
 		for (const userId of data.userIdList) {
 			const user = this.userList.get(userId);
 			if (user) {
@@ -2690,7 +2805,6 @@ export class Room {
 	 * 处理 GameProcessReady 消息
 	 */
 	private handleGameProcessReady(): void {
-
 		// 清除初始化超时定时器
 		this.clearInitTimeout();
 

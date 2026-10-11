@@ -2,8 +2,16 @@ import axios, { AxiosError, type AxiosResponse, type InternalAxiosRequestConfig 
 import { FPMessage } from "@mine-monopoly/ui";
 import { __MONOPOLYSERVER__ } from "@src/../global.config";
 import {
-	clearAccountSession, clearRealmSession, getAccountSession, getAccountToken, getActiveRealm,
-	getRealmToken, getRealmSession, getSessionGeneration, saveAccountSession, synchronizeSessionStorage,
+	clearAccountSession,
+	clearRealmSession,
+	getAccountSession,
+	getAccountToken,
+	getActiveRealm,
+	getRealmToken,
+	getRealmSession,
+	getSessionGeneration,
+	saveAccountSession,
+	synchronizeSessionStorage,
 	tokenClaims,
 } from "../auth/session";
 import type { AccountAuth, AccountProfile, Result } from "./types";
@@ -17,6 +25,7 @@ declare module "axios" {
 		_authToken?: string | null;
 		_authSessionId?: string;
 		expectedRealmSessionId?: string;
+		expectedAccountSessionId?: string;
 	}
 }
 
@@ -24,7 +33,12 @@ export const AXIOS_HANDLED_ERROR = Symbol("__axios_handled_error__");
 
 export class MonopolyApiError extends Error {
 	readonly [AXIOS_HANDLED_ERROR] = true;
-	constructor(public readonly code: number, message: string, public readonly response?: AxiosResponse, public readonly staleIdentity = false) {
+	constructor(
+		public readonly code: number,
+		message: string,
+		public readonly response?: AxiosResponse,
+		public readonly staleIdentity = false,
+	) {
 		super(message);
 		this.name = "MonopolyApiError";
 	}
@@ -44,6 +58,13 @@ const REFRESH_BEFORE_EXPIRY_MS = 60_000;
 /** Player credentials use TLS; loopback HTTP is reserved for the local Vite proxy. */
 export function assertCredentialTransport() {
 	if (typeof window === "undefined") return;
+	const native = window as Window & { Capacitor?: { isNativePlatform?: () => boolean } };
+	if (
+		(window.location.origin === "null" || native.Capacitor?.isNativePlatform?.()) &&
+		!/^https:\/\//i.test(__MONOPOLYSERVER__)
+	) {
+		throw new MonopolyApiError(46000, "原生客户端需要配置绝对 HTTPS API 地址");
+	}
 	const origin = window.location.origin === "null" ? "http://localhost" : window.location.origin;
 	const target = new URL(__MONOPOLYSERVER__, origin);
 	const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(target.hostname);
@@ -57,7 +78,11 @@ export function doRefresh(): Promise<boolean> {
 	if (refreshPromise) return refreshPromise;
 	const session = getAccountSession();
 	if (!session || session.refreshExpiresAt <= Date.now()) return Promise.resolve(false);
-	try { assertCredentialTransport(); } catch { return Promise.resolve(false); }
+	try {
+		assertCredentialTransport();
+	} catch {
+		return Promise.resolve(false);
+	}
 	const rotate = async (synchronize: boolean) => {
 		if (synchronize) synchronizeSessionStorage();
 		const latest = getAccountSession();
@@ -70,10 +95,12 @@ export function doRefresh(): Promise<boolean> {
 		const expectedRefreshToken = latest.refreshToken;
 		const response = await axios.post<Result<AccountAuth>>(
 			`${__MONOPOLYSERVER__.replace(/\/$/, "")}/auth/refresh`,
-			{ refreshToken: expectedRefreshToken }, { timeout: 15000 },
+			{ refreshToken: expectedRefreshToken },
+			{ timeout: 15000 },
 		);
 		if (response.data?.code !== 200) return false;
-		if (getSessionGeneration() !== expectedGeneration || getAccountSession()?.refreshToken !== expectedRefreshToken) return false;
+		if (getSessionGeneration() !== expectedGeneration || getAccountSession()?.refreshToken !== expectedRefreshToken)
+			return false;
 		const credential = response.data.data;
 		saveAccountSession({ ...credential, account: resolveAccountProfile(credential.account) });
 		startTokenRefreshTimer();
@@ -86,7 +113,11 @@ export function doRefresh(): Promise<boolean> {
 		}
 		return await rotate(false);
 	})();
-	const result = pending.catch(() => false).finally(() => { refreshPromise = null; });
+	const result = pending
+		.catch(() => false)
+		.finally(() => {
+			refreshPromise = null;
+		});
 	refreshPromise = result;
 	return result;
 }
@@ -100,19 +131,22 @@ export function startTokenRefreshTimer() {
 	stopTokenRefreshTimer();
 	const session = getAccountSession();
 	if (!session) return;
-	refreshTimer = setTimeout(async () => {
-		refreshTimer = null;
-		const generation = getSessionGeneration();
-		if (await doRefresh()) return;
-		if (getSessionGeneration() !== generation || !getAccountSession()) return;
-		if (getAccountSession()!.refreshExpiresAt <= Date.now()) {
-			clearAccountSession();
-			await navigateToLogin(false);
-		} else {
-			// A transient network failure should not erase an otherwise usable login.
-			refreshTimer = setTimeout(startTokenRefreshTimer, 60_000);
-		}
-	}, Math.max(1000, session.expiresAt - Date.now() - REFRESH_BEFORE_EXPIRY_MS));
+	refreshTimer = setTimeout(
+		async () => {
+			refreshTimer = null;
+			const generation = getSessionGeneration();
+			if (await doRefresh()) return;
+			if (getSessionGeneration() !== generation || !getAccountSession()) return;
+			if (getAccountSession()!.refreshExpiresAt <= Date.now()) {
+				clearAccountSession();
+				await navigateToLogin(false);
+			} else {
+				// A transient network failure should not erase an otherwise usable login.
+				refreshTimer = setTimeout(startTokenRefreshTimer, 60_000);
+			}
+		},
+		Math.max(1000, session.expiresAt - Date.now() - REFRESH_BEFORE_EXPIRY_MS),
+	);
 }
 
 async function navigateToLogin(realmOnly: boolean) {
@@ -131,15 +165,26 @@ export async function ensureValidAuth(): Promise<AccountProfile | null> {
 	}
 }
 
-apiClient.interceptors.request.use(config => {
+apiClient.interceptors.request.use((config) => {
 	const kind = config.identity ?? "account";
-	if (kind === "realm" && config.expectedRealmSessionId && getActiveRealm()?.sessionId !== config.expectedRealmSessionId) {
+	if (
+		kind === "account" &&
+		config.expectedAccountSessionId &&
+		tokenClaims(getAccountToken() ?? "")?.sessionId !== config.expectedAccountSessionId
+	) {
+		throw new MonopolyApiError(46001, "账号会话已变更，本次请求已取消", undefined, true);
+	}
+	if (
+		kind === "realm" &&
+		config.expectedRealmSessionId &&
+		getActiveRealm()?.sessionId !== config.expectedRealmSessionId
+	) {
 		throw new MonopolyApiError(46002, "区服会话已变更，本次请求已取消", undefined, true);
 	}
 	const token = kind === "none" ? null : kind === "realm" ? getRealmToken() : getAccountToken();
 	if (token || ["/auth/login", "/auth/register"].includes(config.url ?? "")) assertCredentialTransport();
 	config._authToken = token;
-	config._authSessionId = token ? tokenClaims(token)?.sessionId as string | undefined : undefined;
+	config._authSessionId = token ? (tokenClaims(token)?.sessionId as string | undefined) : undefined;
 	if (token) config.headers.set("Authorization", `Bearer ${token}`);
 	else config.headers.delete("Authorization");
 	if (kind !== "none" && !token) {
@@ -157,16 +202,27 @@ async function failedRequest(error: MonopolyApiError, config?: InternalAxiosRequ
 		config._authRetried = true;
 		const sameSession = () => config._authSessionId === tokenClaims(getAccountToken() ?? "")?.sessionId;
 		// A sibling request may already have rotated the token that this request sent.
-		if (sameSession() && ((getAccountToken() && getAccountToken() !== config._authToken) || await doRefresh()) && sameSession()) {
+		if (
+			sameSession() &&
+			((getAccountToken() && getAccountToken() !== config._authToken) || (await doRefresh())) &&
+			sameSession()
+		) {
 			return apiClient.request(config);
 		}
 	}
 	if (kind !== "none") {
-		if ((accountExpired || error.code === 46005) && config?._authToken === (kind === "realm" ? getRealmSession()?.token : getAccountToken())) {
+		if (
+			(accountExpired || error.code === 46005) &&
+			config?._authToken === (kind === "realm" ? getRealmSession()?.token : getAccountToken())
+		) {
 			stopTokenRefreshTimer();
 			clearAccountSession();
 			void navigateToLogin(false);
-		} else if (kind === "realm" && realmExpired && (!config?._authToken || config._authToken === getRealmSession()?.token)) {
+		} else if (
+			kind === "realm" &&
+			realmExpired &&
+			(!config?._authToken || config._authToken === getRealmSession()?.token)
+		) {
 			clearRealmSession();
 			void navigateToLogin(true);
 		}
@@ -176,12 +232,13 @@ async function failedRequest(error: MonopolyApiError, config?: InternalAxiosRequ
 }
 
 apiClient.interceptors.response.use(
-	response => {
+	(response) => {
 		const result = response.data as Result<unknown>;
 		if (!result || typeof result.code !== "number") {
 			return failedRequest(new MonopolyApiError(0, "服务器返回了无效的数据", response), response.config);
 		}
-		if (result.code !== 200) return failedRequest(new MonopolyApiError(result.code, result.msg || "请求失败", response), response.config);
+		if (result.code !== 200)
+			return failedRequest(new MonopolyApiError(result.code, result.msg || "请求失败", response), response.config);
 		response.data = result.data;
 		return response;
 	},
@@ -190,8 +247,12 @@ apiClient.interceptors.response.use(
 		if (error instanceof MonopolyApiError) return error.staleIdentity ? Promise.reject(error) : failedRequest(error);
 		const cause = error as AxiosError<Result<unknown>>;
 		const result = cause.response?.data;
-		const message = result?.msg || (cause.code === "ECONNABORTED" ? "请求超时，请稍后再试" : "无法连接游戏服务，请检查网络");
-		return failedRequest(new MonopolyApiError(result?.code ?? cause.response?.status ?? 0, message, cause.response), cause.config);
+		const message =
+			result?.msg || (cause.code === "ECONNABORTED" ? "请求超时，请稍后再试" : "无法连接游戏服务，请检查网络");
+		return failedRequest(
+			new MonopolyApiError(result?.code ?? cause.response?.status ?? 0, message, cause.response),
+			cause.config,
+		);
 	},
 );
 

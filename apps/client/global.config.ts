@@ -24,5 +24,8 @@ export const __ICE_SERVER_HOST__ = peer.host;
 export const __ICE_SERVER_PORT__ = peer.port;
 export const __ICE_USE_PREFIX__ = true;
 export const __FATPAPER_HOST__ = peer.host;
-export const __PROTOCOL__ = __MONOPOLYSERVER__.startsWith("https:") || window.location.protocol === "https:" ? "https" : "http";
-export const __APIPORT__ = Number(new URL(__MONOPOLYSERVER__, browserOrigin).port || (__PROTOCOL__ === "https" ? 443 : 80));
+export const __PROTOCOL__ =
+	__MONOPOLYSERVER__.startsWith("https:") || window.location.protocol === "https:" ? "https" : "http";
+export const __APIPORT__ = Number(
+	new URL(__MONOPOLYSERVER__, browserOrigin).port || (__PROTOCOL__ === "https" ? 443 : 80),
+);

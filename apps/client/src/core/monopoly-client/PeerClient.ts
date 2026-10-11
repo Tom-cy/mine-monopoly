@@ -40,7 +40,7 @@ export class PeerClient {
 				});
 				connectionDiagnostics.checkRelayCandidates();
 				conn.close();
-				reject(reason + ", 连不上主机捏😣");
+				reject(new Error(reason));
 			}, 10000);
 
 			const conn = this.peer.connect(hostId, {
@@ -64,6 +64,7 @@ export class PeerClient {
 
 			conn.on("error", (e) => {
 				clearTimeout(timeOutId);
+				conn.close();
 				connectionDiagnostics.stageFail("DataConnection", `连接错误: ${e.message || e}`, {
 					hostId,
 					peerId: this.peer.id,
@@ -102,6 +103,7 @@ export class PeerClient {
 			);
 
 			const peer = peerId ? new Peer(peerId, peerOptions) : new Peer(peerOptions);
+			let opened = false;
 			const signalingTimeout = setTimeout(() => {
 				peer.destroy();
 				reject(new Error("连接 Peer 信令服务超时，请稍后重试"));
@@ -110,6 +112,7 @@ export class PeerClient {
 			// 注册 PeerJS 生命周期事件
 			peer.on("open", (id) => {
 				clearTimeout(signalingTimeout);
+				opened = true;
 				connectionDiagnostics.logPeerEvent("Peer.open", `peerId=${id}`);
 				connectionDiagnostics.stageEnd("SignalingConnect", { peerId: id });
 				resolve(peer);
@@ -117,6 +120,7 @@ export class PeerClient {
 
 			peer.on("error", (e) => {
 				clearTimeout(signalingTimeout);
+				if (!opened) peer.destroy();
 				connectionDiagnostics.logPeerEvent("Peer.error", `type=${e.type} message=${e.message}`);
 				connectionDiagnostics.stageFail("SignalingConnect", `Peer错误: ${e.type} - ${e.message}`);
 				reject(e);

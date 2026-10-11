@@ -1,9 +1,17 @@
 <script setup lang="ts">
-import { ref, onBeforeUnmount, reactive, onMounted, nextTick } from "vue";
+import { ref, onBeforeUnmount, reactive, onMounted, nextTick, watch } from "vue";
 import router from "@src/router";
 import { randomString, setTimeOutAsync } from "@src/utils";
 import { startTokenRefreshTimer, ensureValidAuth } from "@src/utils/api";
-import { clearRealmSession, getAccountProfile, getAccountToken, getActiveRealm, getCurrentRealmUser, selectRealm, logoutAccount } from "@src/utils/auth";
+import {
+	clearRealmSession,
+	getAccountProfile,
+	getAccountToken,
+	getActiveRealm,
+	getCurrentRealmUser,
+	selectRealm,
+	logoutAccount,
+} from "@src/utils/auth";
 import { FPMessage } from "@mine-monopoly/ui";
 import { useUserInfo } from "@src/store";
 import { LoginDiceRenderer } from "@src/core/three/LoginDiceRenderer";
@@ -38,9 +46,12 @@ async function handleFirstClick() {
 	await loadAccount();
 }
 
-async function loadAccount() {
+let accountLoad = 0;
+async function loadAccount(forceSelect = false) {
+	const request = ++accountLoad;
+	showServers.value = false;
 	const account = await ensureValidAuth();
-	if (disposed) return;
+	if (disposed || request !== accountLoad) return;
 	if (!account) {
 		showLoginMode.value = true;
 		return;
@@ -48,7 +59,7 @@ async function loadAccount() {
 	accountName.value = account.username;
 	useUserInfo().setAccountIdentity(account);
 	startTokenRefreshTimer();
-	if (router.currentRoute.value.query.selectRealm !== "1" && getActiveRealm()) {
+	if (!forceSelect && router.currentRoute.value.query.selectRealm !== "1" && getActiveRealm()) {
 		await resumeRealm();
 	} else {
 		showLoginMode.value = false;
@@ -56,7 +67,9 @@ async function loadAccount() {
 	}
 }
 
-function doLogin() { showUserLogin.value = true; }
+function doLogin() {
+	showUserLogin.value = true;
+}
 async function handleLoginSuccess() {
 	showUserLogin.value = false;
 	showLoginMode.value = false;
@@ -111,8 +124,12 @@ async function showEntrance(avatar: string) {
 	if (!disposed) await router.replace({ name: "room-router" });
 }
 
-function handleShowTouristLoginDialog() { showTouristLogin.value = true; }
-function handleTouristColorClick() { touristColorInputRef.value?.click(); }
+function handleShowTouristLoginDialog() {
+	showTouristLogin.value = true;
+}
+function handleTouristColorClick() {
+	touristColorInputRef.value?.click();
+}
 
 async function handleTouristLogin() {
 	const username = touristLoginForm.userName.trim();
@@ -121,17 +138,26 @@ async function handleTouristLogin() {
 		return;
 	}
 	const user = { userId: "local-player-" + randomString(12), username, color: touristLoginForm.color, avatar: "" };
+	accountLoad++;
 	clearRealmSession();
 	useUserInfo().setLocalIdentity(user);
 	// This profile is cosmetic and is never sent as an online identity.
-	try { localStorage.setItem("monopoly.mine.localUser.v1", JSON.stringify(user)); } catch { /* optional storage */ }
+	try {
+		localStorage.setItem("monopoly.mine.localUser.v1", JSON.stringify(user));
+	} catch {
+		/* optional storage */
+	}
 	await showEntrance("");
 }
 
 async function handleLogout() {
+	accountLoad++;
 	entering.value = true;
-	try { await logoutAccount(); } catch { /* local session is cleared even if offline */ }
-	finally {
+	try {
+		await logoutAccount();
+	} catch {
+		/* local session is cleared even if offline */
+	} finally {
 		entering.value = false;
 		showServers.value = false;
 		showLoginMode.value = true;
@@ -139,10 +165,26 @@ async function handleLogout() {
 }
 
 onMounted(() => {
+	window.addEventListener("monopoly-session-change", handleSessionChange);
 	if (router.currentRoute.value.query.selectRealm === "1") void handleFirstClick();
 });
+watch(
+	() => router.currentRoute.value.query.selectRealm,
+	(value) => {
+		if (value !== "1") return;
+		firstClick.value = true;
+		void loadAccount(true);
+	},
+);
+function handleSessionChange(event: Event) {
+	if (!(event as CustomEvent<{ parentChanged: boolean }>).detail?.parentChanged) return;
+	showUserLogin.value = false;
+	firstClick.value = true;
+	void loadAccount(true);
+}
 onBeforeUnmount(() => {
 	disposed = true;
+	window.removeEventListener("monopoly-session-change", handleSessionChange);
 	loginCodeRenderer?.clear();
 	loginCodeRenderer = null;
 });
@@ -196,7 +238,11 @@ onBeforeUnmount(() => {
 								v-model="touristLoginForm.color"
 								class="color-input-hidden"
 							/>
-							<div class="color-preview" :style="{ backgroundColor: touristLoginForm.color }" @click="handleTouristColorClick">
+							<div
+								class="color-preview"
+								:style="{ backgroundColor: touristLoginForm.color }"
+								@click="handleTouristColorClick"
+							>
 								<span class="color-value">{{ touristLoginForm.color }}</span>
 							</div>
 						</div>
@@ -205,13 +251,16 @@ onBeforeUnmount(() => {
 			</FpDialog>
 		</div>
 
-		<RealmSelector v-if="showServers" :busy="entering" :account-name="accountName" @select="enterRealm" @resume="resumeRealm" @logout="handleLogout" />
+		<RealmSelector
+			v-if="showServers"
+			:busy="entering"
+			:account-name="accountName"
+			@select="enterRealm"
+			@resume="resumeRealm"
+			@logout="handleLogout"
+		/>
 
-		<FpDialog
-			v-model:visible="showUserLogin"
-			:hidden-footer="true"
-			:closable="true"
-		>
+		<FpDialog v-model:visible="showUserLogin" :hidden-footer="true" :closable="true">
 			<template #title>
 				<span style="font-size: 1.2rem">账号登录 / 注册</span>
 			</template>
@@ -335,12 +384,18 @@ onBeforeUnmount(() => {
 		border-radius: 1.8rem;
 		background-color: rgba(255, 255, 255, 0.65);
 		cursor: pointer;
-		transition: 0.5s background-color, 0.5s border, 0.5s border-radius;
+		transition:
+			0.5s background-color,
+			0.5s border,
+			0.5s border-radius;
 		overflow: hidden;
 		position: relative;
 
 		& > span {
-			transition: 0.2s font-size, 0.2s color, 0.2s margin-bottom;
+			transition:
+				0.2s font-size,
+				0.2s color,
+				0.2s margin-bottom;
 			font-size: 2rem;
 			color: var(--fp-color-primary);
 			text-shadow: var(--fp-text-shadow);
@@ -356,7 +411,12 @@ onBeforeUnmount(() => {
 		}
 
 		& > .icon {
-			transition: 0.2s font-size, 0.2s color, 0.2s opacity, 0.2s top, 0.2s left;
+			transition:
+				0.2s font-size,
+				0.2s color,
+				0.2s opacity,
+				0.2s top,
+				0.2s left;
 			position: absolute;
 			font-size: 10rem;
 			top: 50%;

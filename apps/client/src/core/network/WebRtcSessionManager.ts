@@ -56,7 +56,9 @@ const MAP_CHUNK_BIN_TYPE = 1;
  * 新格式: [type][session 长度][session UTF-8][chunkIndex][数据]；旧格式: [type][chunkIndex][数据]。
  * 返回 null 表示不是合法的地图分块包。
  */
-function parseMapChunkBinaryPacket(bytes: Uint8Array): SocketMessage<SocketMsgType.MapChunk, SocketMsgSource.Server> | null {
+function parseMapChunkBinaryPacket(
+	bytes: Uint8Array,
+): SocketMessage<SocketMsgType.MapChunk, SocketMsgSource.Server> | null {
 	if (bytes.length < 5 || bytes[0] !== MAP_CHUNK_BIN_TYPE) return null;
 
 	const sessionLength = bytes[1];
@@ -68,7 +70,11 @@ function parseMapChunkBinaryPacket(bytes: Uint8Array): SocketMessage<SocketMsgTy
 
 	if (isNewProtocolPacket) {
 		const chunkIndex =
-			(((bytes[indexOffset] << 24) | (bytes[indexOffset + 1] << 16) | (bytes[indexOffset + 2] << 8) | bytes[indexOffset + 3]) >>> 0);
+			((bytes[indexOffset] << 24) |
+				(bytes[indexOffset + 1] << 16) |
+				(bytes[indexOffset + 2] << 8) |
+				bytes[indexOffset + 3]) >>>
+			0;
 		return {
 			type: SocketMsgType.MapChunk,
 			source: SocketMsgSource.Server,
@@ -76,7 +82,7 @@ function parseMapChunkBinaryPacket(bytes: Uint8Array): SocketMessage<SocketMsgTy
 		};
 	}
 
-	const chunkIndex = (((bytes[1] << 24) | (bytes[2] << 16) | (bytes[3] << 8) | bytes[4]) >>> 0);
+	const chunkIndex = ((bytes[1] << 24) | (bytes[2] << 16) | (bytes[3] << 8) | bytes[4]) >>> 0;
 	return {
 		type: SocketMsgType.MapChunk,
 		source: SocketMsgSource.Server,
@@ -92,7 +98,9 @@ class HostRoomClosedError extends Error {
 	}
 }
 class RoomIdentityExpiredError extends Error {
-	public constructor(public readonly staleIdentity = false) { super("区服身份或房间成员席位已失效，请重新入房"); }
+	public constructor(public readonly staleIdentity = false) {
+		super("区服身份或房间成员席位已失效，请重新入房");
+	}
 }
 
 type JoinAcknowledgement = {
@@ -127,7 +135,8 @@ export class WebRtcSessionManager {
 	private pendingJoin: JoinAcknowledgement | null = null;
 	private closeRequest: Promise<void> | null = null;
 	private readonly unload = () => {
-		if (this.reconnectContext && !this.host) void leaveRoom(this.reconnectContext.roomId, true).catch(() => undefined);
+		if (this.reconnectContext && !this.host)
+			void leaveRoom(this.reconnectContext.roomId, true).catch(() => undefined);
 	};
 	private listeners = new Map<WebRtcSessionEvent, Set<(payload: unknown) => void>>();
 
@@ -293,27 +302,44 @@ export class WebRtcSessionManager {
 	}
 	public loadSave(record: any, usePrevious: boolean): Promise<{ success: boolean; error?: string }> {
 		return (
-			this.localPartySession?.loadSave(record, usePrevious) ?? this.host?.getRoom().loadSave(record, usePrevious) ?? Promise.resolve({ success: false, error: "未连接到主机" })
+			this.localPartySession?.loadSave(record, usePrevious) ??
+			this.host?.getRoom().loadSave(record, usePrevious) ??
+			Promise.resolve({ success: false, error: "未连接到主机" })
 		);
 	}
 	public changeColorForUser(userId: string, color: string) {
-		return this.localPartySession?.changeColorForUser(userId, color) ?? this.host?.getRoom().changeColor(userId, color) ?? { success: false, error: "只有房主可以执行此操作" };
+		return (
+			this.localPartySession?.changeColorForUser(userId, color) ??
+			this.host?.getRoom().changeColor(userId, color) ?? { success: false, error: "只有房主可以执行此操作" }
+		);
 	}
 	public addAIPlayer() {
-		return this.localPartySession?.addAIPlayer() ?? this.host?.getRoom().addAiPlayer() ?? { success: false, error: "只有房主可以添加 AI" };
+		return (
+			this.localPartySession?.addAIPlayer() ??
+			this.host?.getRoom().addAiPlayer() ?? { success: false, error: "只有房主可以添加 AI" }
+		);
 	}
 	public randomizeAIRoles(): boolean {
 		return this.localPartySession?.randomizeAIRoles() ?? this.host?.getRoom().randomizeAiRoles() ?? false;
 	}
 	public setSpectatorMode(enabled: boolean) {
-		return this.host?.getRoom().setOwnerSpectatorMode(enabled) ?? { success: false, error: "只有房主可以切换旁观模式" };
+		return (
+			this.host?.getRoom().setOwnerSpectatorMode(enabled) ?? { success: false, error: "只有房主可以切换旁观模式" }
+		);
 	}
 	public changeRoleForUser(userId: string, roleId: string) {
-		return this.localPartySession?.changeRoleForUser(userId, roleId) ?? this.host?.getRoom().changeRole(userId, roleId) ?? { success: false, error: "只有房主可以修改角色" };
+		return (
+			this.localPartySession?.changeRoleForUser(userId, roleId) ??
+			this.host?.getRoom().changeRole(userId, roleId) ?? { success: false, error: "只有房主可以修改角色" }
+		);
 	}
 	public updateAIPlayerName(userId: string, username: string) {
 		return (
-			this.localPartySession?.updateAIPlayerName(userId, username) ?? this.host?.getRoom().updateAIPlayerName(userId, username) ?? { success: false, error: "只有房主可以修改 AI 名称" }
+			this.localPartySession?.updateAIPlayerName(userId, username) ??
+			this.host?.getRoom().updateAIPlayerName(userId, username) ?? {
+				success: false,
+				error: "只有房主可以修改 AI 名称",
+			}
 		);
 	}
 	public updateAIDecisionConfig(config: AIDecisionConfig): void {
@@ -330,8 +356,10 @@ export class WebRtcSessionManager {
 		return this.localPartySession?.removeAIPlayer(userId) ?? this.host?.getRoom().removeAiPlayer(userId) ?? false;
 	}
 	public changeLocalPartyMap(mapInfo: RoomMapInfo): Promise<{ success: boolean; error?: string }> {
-		return this.localPartySession?.changeGameMap(mapInfo)
-			?? Promise.resolve({ success: false, error: "本地派对未创建" });
+		return (
+			this.localPartySession?.changeGameMap(mapInfo) ??
+			Promise.resolve({ success: false, error: "本地派对未创建" })
+		);
 	}
 	public changeGameMap(mapInfo: RoomMapInfo): boolean {
 		if (this.localPartySession || !this.host) return false;
@@ -339,9 +367,17 @@ export class WebRtcSessionManager {
 		return true;
 	}
 
-	public async close(): Promise<void> {
+	public async close(keepalive = false): Promise<void> {
 		if (this.closeRequest) return this.closeRequest;
-		if (this.state === "closed" && !this.connection && !this.peerClient && !this.host && !this.localPartySession && !this.reconnectContext) return;
+		if (
+			this.state === "closed" &&
+			!this.connection &&
+			!this.peerClient &&
+			!this.host &&
+			!this.localPartySession &&
+			!this.reconnectContext
+		)
+			return;
 		this.explicitClose = true;
 		++this.lifecycleGeneration;
 		this.transition("closing");
@@ -361,10 +397,12 @@ export class WebRtcSessionManager {
 		this.host = null;
 		this.reconnectContext = null;
 		this.closeRequest = (async () => {
-			if (host) await host.close();
-			else if (roomId) await leaveRoom(roomId).catch(() => undefined);
+			if (host) await host.close(keepalive);
+			else if (roomId) await leaveRoom(roomId, keepalive).catch(() => undefined);
 			this.transition("closed");
-		})().finally(() => { this.closeRequest = null; });
+		})().finally(() => {
+			this.closeRequest = null;
+		});
 		return this.closeRequest;
 	}
 
@@ -377,11 +415,13 @@ export class WebRtcSessionManager {
 			await this.assertRoomStillActive(context.roomId);
 			this.assertLifecycle(generation);
 			await this.establishConnection(context, generation);
-		})().catch((error: unknown) => {
-			this.throwLifecycleError(error);
-		}).finally(() => {
-			if (this.connectionAttempt?.request === request) this.connectionAttempt = null;
-		});
+		})()
+			.catch((error: unknown) => {
+				this.throwLifecycleError(error);
+			})
+			.finally(() => {
+				if (this.connectionAttempt?.request === request) this.connectionAttempt = null;
+			});
 		this.connectionAttempt = { generation, request };
 		return request;
 	}
@@ -407,7 +447,8 @@ export class WebRtcSessionManager {
 	private throwLifecycleError(error: unknown): never {
 		const code = backendErrorCode(error);
 		if (code === 46022) throw new HostRoomClosedError("expired");
-		if (code !== undefined && [46001, 46002, 46003, 46004, 46005, 46010].includes(code)) throw new RoomIdentityExpiredError(isStaleBackendIdentity(error));
+		if (code !== undefined && [46001, 46002, 46003, 46004, 46005, 46010].includes(code))
+			throw new RoomIdentityExpiredError(isStaleBackendIdentity(error));
 		throw error;
 	}
 
@@ -457,7 +498,10 @@ export class WebRtcSessionManager {
 		this.peerStrategy = strategy;
 	}
 	private buildRtcConfig(): RTCConfiguration {
-		return { iceServers: this.iceServers, ...(this.strategy === "force-relay" ? { iceTransportPolicy: "relay" } : {}) };
+		return {
+			iceServers: this.iceServers,
+			...(this.strategy === "force-relay" ? { iceTransportPolicy: "relay" } : {}),
+		};
 	}
 
 	private bindConnection(connection: DataConnection): void {
@@ -511,17 +555,26 @@ export class WebRtcSessionManager {
 		this.stopMemberHeartbeat();
 		const renew = () => {
 			if (this.explicitClose || generation !== this.lifecycleGeneration || this.memberHeartbeatRequest) return;
-			const request = emitMemberHeart(roomId).catch((error: unknown) => {
-				if (this.explicitClose || generation !== this.lifecycleGeneration) return;
-				const code = backendErrorCode(error);
-				if (code === undefined || ![46001, 46002, 46003, 46004, 46005, 46010, 46022].includes(code)) return;
-				const closingGeneration = this.lifecycleGeneration + 1;
-				void this.close().then(() => {
-					if (this.lifecycleGeneration !== closingGeneration || !this.explicitClose || isStaleBackendIdentity(error)) return;
-					this.options.onHostClosed?.(code === 46022 ? "expired" : "closed");
-					this.emit("host-closed", code === 46022 ? "expired" : "closed");
+			const request = emitMemberHeart(roomId)
+				.catch((error: unknown) => {
+					if (this.explicitClose || generation !== this.lifecycleGeneration) return;
+					const code = backendErrorCode(error);
+					if (code === undefined || ![46001, 46002, 46003, 46004, 46005, 46010, 46022].includes(code)) return;
+					const closingGeneration = this.lifecycleGeneration + 1;
+					void this.close().then(() => {
+						if (
+							this.lifecycleGeneration !== closingGeneration ||
+							!this.explicitClose ||
+							isStaleBackendIdentity(error)
+						)
+							return;
+						this.options.onHostClosed?.(code === 46022 ? "expired" : "closed");
+						this.emit("host-closed", code === 46022 ? "expired" : "closed");
+					});
+				})
+				.finally(() => {
+					if (this.memberHeartbeatRequest === request) this.memberHeartbeatRequest = null;
 				});
-			}).finally(() => { if (this.memberHeartbeatRequest === request) this.memberHeartbeatRequest = null; });
 			this.memberHeartbeatRequest = request;
 		};
 		// HTTP liveness continues during map loading and transport recovery.
@@ -576,7 +629,9 @@ export class WebRtcSessionManager {
 				this.options.onReconnectAttempt?.(attempt, this.strategy);
 				this.emit("reconnect-attempt", { attempt, strategy: this.strategy });
 			},
-			onSuccess: () => { if (!this.explicitClose) this.transition("connected"); },
+			onSuccess: () => {
+				if (!this.explicitClose) this.transition("connected");
+			},
 			onFail: (error) => {
 				if (this.explicitClose) return;
 				this.reconnectManager = null;
@@ -599,7 +654,8 @@ export class WebRtcSessionManager {
 				void this.close();
 				this.options.onReconnectCancelled?.();
 			},
-			shouldRetry: (error) => !(error instanceof HostRoomClosedError) && !(error instanceof RoomIdentityExpiredError),
+			shouldRetry: (error) =>
+				!(error instanceof HostRoomClosedError) && !(error instanceof RoomIdentityExpiredError),
 		});
 		this.reconnectManager.start();
 	}

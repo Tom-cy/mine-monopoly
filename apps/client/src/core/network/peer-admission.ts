@@ -9,8 +9,13 @@ export interface PeerIdentity {
 
 /** The Peer connection and the consumed server ticket jointly identify a player. */
 export function verifyPeerIdentity(identity: PeerIdentity, expected: Omit<PeerIdentity, "roleId">): string {
-	if (typeof identity.roleId !== "string" || !/^[1-9]\d*$/.test(identity.roleId) || identity.peerId !== expected.peerId ||
-		identity.roomSessionId !== expected.roomSessionId || identity.hostEpoch !== expected.hostEpoch) {
+	if (
+		typeof identity.roleId !== "string" ||
+		!/^[1-9]\d*$/.test(identity.roleId) ||
+		identity.peerId !== expected.peerId ||
+		identity.roomSessionId !== expected.roomSessionId ||
+		identity.hostEpoch !== expected.hostEpoch
+	) {
 		throw new Error("成员票据与当前房间连接不符");
 	}
 	return identity.roleId;
@@ -18,10 +23,15 @@ export function verifyPeerIdentity(identity: PeerIdentity, expected: Omit<PeerId
 
 /** Profile fields are cosmetic; client-supplied IDs, roles and privilege flags are discarded. */
 export function canonicalPeerUser(profile: Record<string, unknown>, roleId: string): User {
-	const username = typeof profile.username === "string"
-		? profile.username.replace(/[<>]/g, "").trim().slice(0, 20) : "";
-	const avatar = typeof profile.avatar === "string" && profile.avatar.length <= 2048 &&
-		(/^(https?:\/\/|\/)/i.test(profile.avatar) && !profile.avatar.startsWith("//")) ? profile.avatar : "";
+	const username =
+		typeof profile.username === "string" ? profile.username.replace(/[<>]/g, "").trim().slice(0, 20) : "";
+	const avatar =
+		typeof profile.avatar === "string" &&
+		profile.avatar.length <= 2048 &&
+		/^(https?:\/\/|\/)/i.test(profile.avatar) &&
+		!profile.avatar.startsWith("//")
+			? profile.avatar
+			: "";
 	return {
 		userId: roleId,
 		username: username || `玩家${roleId}`,
@@ -32,8 +42,14 @@ export function canonicalPeerUser(profile: Record<string, unknown>, roleId: stri
 }
 
 export function readPeerTicket(metadata: unknown): string {
-	if (!metadata || typeof metadata !== "object" || !("ticket" in metadata) ||
-		typeof metadata.ticket !== "string" || !metadata.ticket || metadata.ticket.length > 512) {
+	if (
+		!metadata ||
+		typeof metadata !== "object" ||
+		!("ticket" in metadata) ||
+		typeof metadata.ticket !== "string" ||
+		!metadata.ticket ||
+		metadata.ticket.length > 512
+	) {
 		throw new Error("连接缺少成员票据");
 	}
 	return metadata.ticket;

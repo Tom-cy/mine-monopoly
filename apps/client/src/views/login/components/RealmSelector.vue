@@ -43,26 +43,39 @@ function unavailable(server: ServerInfo): string {
 	return "";
 }
 
-onMounted(() => { void load(); });
+onMounted(() => {
+	void load();
+});
 onBeforeUnmount(() => request?.abort());
 </script>
 
 <template>
 	<section class="realm-selector" aria-label="选择区服">
 		<div class="heading">
-			<div><h2>选择区服</h2><p>{{ accountName }}，进入区服后使用该区服角色游玩。</p></div>
+			<div>
+				<h2>选择区服</h2>
+				<p>{{ accountName }}，进入区服后使用该区服角色游玩。</p>
+			</div>
 			<button :disabled="props.busy" @click="emit('logout')">退出账号</button>
 		</div>
-		<p v-if="active" class="notice">切换区服会退出当前在线房间。<button :disabled="busy" @click="emit('resume')">继续当前区服</button></p>
+		<p v-if="active" class="notice">
+			切换区服会退出当前在线房间。<button :disabled="busy" @click="emit('resume')">继续当前区服</button>
+		</p>
 		<p v-if="loading" role="status">正在读取区服…</p>
 		<div v-else-if="failure" role="alert">未能获取区服。<button @click="load()">重试</button></div>
 		<p v-else-if="!servers.length">暂无可用区服，请稍后刷新。</p>
 		<div v-else class="server-grid">
-			<button v-for="server in servers" :key="server.id" class="server" :disabled="busy || Boolean(unavailable(server))" @click="emit('select', server.id)">
+			<button
+				v-for="server in servers"
+				:key="server.id"
+				class="server"
+				:disabled="busy || Boolean(unavailable(server))"
+				@click="emit('select', server.id)"
+			>
 				<strong>{{ server.serverName }}</strong>
-				<span>{{ server.serverCode }} · {{ unavailable(server) || '开放' }}</span>
+				<span>{{ server.serverCode }} · {{ unavailable(server) || "开放" }}</span>
 				<span>{{ server.roleCount }} / {{ server.roleCapacity }} 个角色</span>
-				<span>{{ server.nickname ? `角色：${server.nickname}` : '首次进入将创建角色' }}</span>
+				<span>{{ server.nickname ? `角色：${server.nickname}` : "首次进入将创建角色" }}</span>
 				<small v-if="server.announcement">{{ server.announcement }}</small>
 			</button>
 		</div>
@@ -84,7 +97,7 @@ onBeforeUnmount(() => request?.abort());
 	margin: 2rem auto;
 	padding: 1.5rem;
 	border-radius: 1rem;
-	background: rgba(255, 255, 255, .94);
+	background: rgba(255, 255, 255, 0.94);
 	color: #333;
 }
 .heading {
@@ -92,7 +105,9 @@ onBeforeUnmount(() => request?.abort());
 	gap: 1rem;
 	align-items: center;
 	justify-content: space-between;
-	h2 { margin: 0 0 .5rem; }
+	h2 {
+		margin: 0 0 0.5rem;
+	}
 }
 .server-grid {
 	display: grid;
@@ -103,28 +118,39 @@ onBeforeUnmount(() => request?.abort());
 	display: flex;
 	flex-direction: column;
 	align-items: flex-start;
-	gap: .5rem;
+	gap: 0.5rem;
 	padding: 1rem;
 	text-align: left;
 	border: 2px solid var(--fp-color-primary);
-	border-radius: .8rem;
+	border-radius: 0.8rem;
 	background: white;
 	color: #333;
-	strong { font-size: 1.25rem; }
-	small { white-space: pre-wrap; overflow-wrap: anywhere; }
+	strong {
+		font-size: 1.25rem;
+	}
+	small {
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+	}
 }
 button {
-	padding: .5rem .8rem;
+	padding: 0.5rem 0.8rem;
 	cursor: pointer;
-	&:disabled { opacity: .55; cursor: default; }
+	&:disabled {
+		opacity: 0.55;
+		cursor: default;
+	}
 }
 .pagination {
 	display: flex;
 	justify-content: center;
 	align-items: center;
 	flex-wrap: wrap;
-	gap: .8rem;
+	gap: 0.8rem;
 	margin-top: 1rem;
 }
-.notice { padding: .7rem; background: #fff4cf; }
+.notice {
+	padding: 0.7rem;
+	background: #fff4cf;
+}
 </style>

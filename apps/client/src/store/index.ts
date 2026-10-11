@@ -23,11 +23,11 @@ import { useLocalParty } from "./local-party";
  * 回合状态枚举
  */
 enum TurnState {
-	WAITING_TURN = "waiting_turn",      // 等待回合
-	MY_TURN = "my_turn",                // 我的回合（可操作）
-	ANIMATING = "animating",            // 动画中（不可操作）
-	TIMEOUT = "timeout",                // 超时（不可操作）
-	BANKRUPTED = "bankrupted"           // 已破产（不可操作）
+	WAITING_TURN = "waiting_turn", // 等待回合
+	MY_TURN = "my_turn", // 我的回合（可操作）
+	ANIMATING = "animating", // 动画中（不可操作）
+	TIMEOUT = "timeout", // 超时（不可操作）
+	BANKRUPTED = "bankrupted", // 已破产（不可操作）
 }
 
 export const useLoading = defineStore("loading", {
@@ -141,9 +141,19 @@ export const useRoomInfo = defineStore("roomInfo", {
 	},
 	actions: {},
 	getters: {
-		amIRoomOwner: (state) => useLocalParty().isActive ? state.ownerId === useLocalParty().players[0]?.userId : useUserInfo().userId === state.ownerId,
-		isReady: (state) => state.userList.find((user) => user.userId === (useLocalParty().isActive ? useLocalParty().players[0]?.userId : useUserInfo().userId))?.isReady ?? false,
-		amISpectator: (state) => useLocalParty().isActive ? false : Boolean(state.userList.find((user) => user.userId === useUserInfo().userId)?.isSpectator),
+		amIRoomOwner: (state) =>
+			useLocalParty().isActive
+				? state.ownerId === useLocalParty().players[0]?.userId
+				: useUserInfo().userId === state.ownerId,
+		isReady: (state) =>
+			state.userList.find(
+				(user) =>
+					user.userId === (useLocalParty().isActive ? useLocalParty().players[0]?.userId : useUserInfo().userId),
+			)?.isReady ?? false,
+		amISpectator: (state) =>
+			useLocalParty().isActive
+				? false
+				: Boolean(state.userList.find((user) => user.userId === useUserInfo().userId)?.isSpectator),
 	},
 });
 

@@ -32,7 +32,9 @@ export function tokenClaims(token: string): Record<string, unknown> | null {
 		const segment = token.split(".")[1];
 		if (!segment || segment.length > 12000) return null;
 		const base64 = segment.replace(/-/g, "+").replace(/_/g, "/");
-		const bytes = Uint8Array.from(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, "=")), char => char.charCodeAt(0));
+		const bytes = Uint8Array.from(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, "=")), (char) =>
+			char.charCodeAt(0),
+		);
 		return JSON.parse(new TextDecoder().decode(bytes));
 	} catch {
 		return null;
@@ -43,25 +45,43 @@ function validAccount(value: unknown): value is AccountAuth {
 	if (!value || typeof value !== "object") return false;
 	const item = value as AccountAuth;
 	const claims = typeof item.token === "string" ? tokenClaims(item.token) : null;
-	return claims?.tokenType === "ACCOUNT" && typeof claims.sessionId === "string"
-		&& typeof item.refreshToken === "string" && item.refreshToken.length > 0
-		&& Number.isFinite(item.expiresAt) && item.expiresAt > 0 && Number.isFinite(item.refreshExpiresAt)
-		&& typeof item.account?.id === "string" && /^[1-9][0-9]*$/.test(item.account.id) && claims.accountId === item.account.id
-		&& typeof item.account.useraccount === "string" && typeof item.account.username === "string";
+	return (
+		claims?.tokenType === "ACCOUNT" &&
+		typeof claims.sessionId === "string" &&
+		typeof item.refreshToken === "string" &&
+		item.refreshToken.length > 0 &&
+		Number.isFinite(item.expiresAt) &&
+		item.expiresAt > 0 &&
+		Number.isFinite(item.refreshExpiresAt) &&
+		typeof item.account?.id === "string" &&
+		/^[1-9][0-9]*$/.test(item.account.id) &&
+		claims.accountId === item.account.id &&
+		typeof item.account.useraccount === "string" &&
+		typeof item.account.username === "string"
+	);
 }
 
 function validRealm(value: unknown, parent: AccountAuth | null): value is ActiveRealm {
 	if (!value || typeof value !== "object" || !parent) return false;
 	const item = value as ActiveRealm;
 	const claims = typeof item.token === "string" ? tokenClaims(item.token) : null;
-	return claims?.tokenType === "REALM" && typeof claims.sessionId === "string"
-		&& item.sessionId === claims.sessionId
-		&& claims.accountSessionId === tokenClaims(parent.token)?.sessionId
-		&& claims.accountId === item.accountId && item.accountId === parent.account.id
-		&& claims.serverId === item.serverId && claims.roleId === item.roleId
-		&& typeof item.serverId === "string" && /^[1-9][0-9]*$/.test(item.serverId)
-		&& typeof item.roleId === "string" && /^[1-9][0-9]*$/.test(item.roleId)
-		&& typeof item.nickname === "string" && Number.isFinite(item.expiresAt) && item.expiresAt > 0;
+	return (
+		claims?.tokenType === "REALM" &&
+		typeof claims.sessionId === "string" &&
+		item.sessionId === claims.sessionId &&
+		claims.accountSessionId === tokenClaims(parent.token)?.sessionId &&
+		claims.accountId === item.accountId &&
+		item.accountId === parent.account.id &&
+		claims.serverId === item.serverId &&
+		claims.roleId === item.roleId &&
+		typeof item.serverId === "string" &&
+		/^[1-9][0-9]*$/.test(item.serverId) &&
+		typeof item.roleId === "string" &&
+		/^[1-9][0-9]*$/.test(item.roleId) &&
+		typeof item.nickname === "string" &&
+		Number.isFinite(item.expiresAt) &&
+		item.expiresAt > 0
+	);
 }
 
 function initialize() {
@@ -73,7 +93,11 @@ function initialize() {
 	realm = validRealm(cachedRealm, account) ? cachedRealm : null;
 	// Old Node-server credentials and guest identities must never become online credentials.
 	for (const key of ["token", "refreshToken", "encryption-key"]) {
-		try { localStorage.removeItem(key); } catch { /* storage is optional */ }
+		try {
+			localStorage.removeItem(key);
+		} catch {
+			/* storage is optional */
+		}
 	}
 }
 
@@ -173,20 +197,27 @@ export function getCurrentRealmUser(): RealmUser | null {
 	const profile = getAccountProfile();
 	if (!active || !profile) return null;
 	return {
-		id: active.roleId, userId: active.roleId, useraccount: profile.useraccount,
-		username: active.nickname, avatar: profile.avatarUrl ?? "", color: profile.color ?? "#4F7CFF", isReady: false,
+		id: active.roleId,
+		userId: active.roleId,
+		useraccount: profile.useraccount,
+		username: active.nickname,
+		avatar: profile.avatarUrl ?? "",
+		color: profile.color ?? "#4F7CFF",
+		isReady: false,
 	};
 }
 
 if (typeof window !== "undefined") {
-	window.addEventListener("storage", event => {
+	window.addEventListener("storage", (event) => {
 		if (event.key !== ACCOUNT_KEY && event.key !== REALM_KEY && event.key !== null) return;
 		const previousAccount = account;
 		const previousRealm = realm;
 		initialized = false;
 		initialize();
-		if (previousAccount?.token !== account?.token || previousAccount?.refreshToken !== account?.refreshToken) generation++;
-		const parentChanged = tokenClaims(previousAccount?.token ?? "")?.sessionId !== tokenClaims(account?.token ?? "")?.sessionId;
+		if (previousAccount?.token !== account?.token || previousAccount?.refreshToken !== account?.refreshToken)
+			generation++;
+		const parentChanged =
+			tokenClaims(previousAccount?.token ?? "")?.sessionId !== tokenClaims(account?.token ?? "")?.sessionId;
 		const realmChanged = previousRealm?.sessionId !== realm?.sessionId;
 		window.dispatchEvent(new CustomEvent("monopoly-session-change", { detail: { parentChanged, realmChanged } }));
 	});

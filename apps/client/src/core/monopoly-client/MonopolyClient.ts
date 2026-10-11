@@ -516,17 +516,16 @@ export class MonopolyClient {
 		return result;
 	}
 
-	public destory() {
-		void this.session.close();
+	public destory(keepalive = false): Promise<void> {
+		return this.session.close(keepalive);
 	}
 
-	public static destoryInstance() {
-		if (this.instance) {
-			this.instance.destory();
-			this.instance = null;
-		}
+	public static destoryInstance(keepalive = false): Promise<void> {
+		const closing = this.instance?.destory(keepalive) || Promise.resolve();
+		this.instance = null;
 		// 移除 beforeunload 事件监听器
 		window.removeEventListener("beforeunload", destoryMonopolyClient);
+		return closing;
 	}
 }
 
@@ -537,10 +536,12 @@ function useMonopolyClient(options?: MonopolyClientOptions) {
 	return options ? MonopolyClient.getInstance(options) : MonopolyClient.getInstance();
 }
 
-function destoryMonopolyClient() {
+function destoryMonopolyClient(event?: Event): Promise<void> {
 	try {
-		MonopolyClient.getInstance() && MonopolyClient.destoryInstance();
-	} catch (e) {}
+		return MonopolyClient.destoryInstance(event?.type === "beforeunload");
+	} catch {
+		return Promise.resolve();
+	}
 }
 
 export { useMonopolyClient, destoryMonopolyClient };

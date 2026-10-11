@@ -320,6 +320,46 @@ test("frozen object SHA-256 rejects modified bytes", async () => {
 	await gameFile.verifyMapFileHash(bytes, expected);
 	await assert.rejects(gameFile.verifyMapFileHash(bytes, "0".repeat(64)), /SHA-256/);
 });
+test("client destruction awaits session cleanup and preserves keepalive for beforeunload", async () => {
+	let finishClose;
+	const closing = new Promise((resolve) => {
+		finishClose = resolve;
+	});
+	let closeKeepalive;
+	class Session {
+		close(keepalive) {
+			closeKeepalive = keepalive;
+			return closing;
+		}
+	}
+	const client = load(
+		"src/core/monopoly-client/MonopolyClient.ts",
+		{
+			"@mine-monopoly/ui": {},
+			"@src/store": {},
+			"@src/store/game": {},
+			"@src/utils/api/room-router": rooms,
+			"@src/utils/auth": {},
+			"@src/core/network/WebRtcSessionManager": { WebRtcSessionManager: Session },
+			"@mine-monopoly/types": {},
+			"./host-message-handlers": {},
+			"@src/router": {},
+			"@src/utils/connection-diagnostics": {},
+		},
+		{ window: { addEventListener() {}, removeEventListener() {} } },
+	);
+	await client.useMonopolyClient({ iceServer: { host: "localhost", port: 9003 } });
+	let finished = false;
+	const cleanup = client.destoryMonopolyClient({ type: "beforeunload" }).then(() => {
+		finished = true;
+	});
+	assert.equal(closeKeepalive, true);
+	await Promise.resolve();
+	assert.equal(finished, false);
+	finishClose();
+	await cleanup;
+	assert.equal(finished, true);
+});
 (async () => {
 	for (const [name, run] of tests) {
 		await run();
