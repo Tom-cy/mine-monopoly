@@ -1,157 +1,155 @@
 <script setup lang="ts">
-import { ref, onBeforeMount, onBeforeUnmount, reactive, onMounted, nextTick, h } from "vue";
+import { ref, onBeforeUnmount, reactive, onMounted, nextTick } from "vue";
 import router from "@src/router";
-import { __PROTOCOL__ } from "@src/../global.config";
-import { exitFullScreen, randomString, setTimeOutAsync } from "@src/utils";
-import { startTokenRefreshTimer, stopTokenRefreshTimer, ensureValidAuth } from "@src/utils/api/index";
+import { randomString, setTimeOutAsync } from "@src/utils";
+import { startTokenRefreshTimer, ensureValidAuth } from "@src/utils/api";
+import { clearRealmSession, getAccountProfile, getAccountToken, getActiveRealm, getCurrentRealmUser, selectRealm, logoutAccount } from "@src/utils/auth";
 import { FPMessage } from "@mine-monopoly/ui";
 import { useUserInfo } from "@src/store";
 import { LoginDiceRenderer } from "@src/core/three/LoginDiceRenderer";
 import { FontAwesomeIcon } from "@fortawesome/vue-fontawesome";
-import FpPopover from "@src/components/utils/fp-popover/fp-popover.vue";
 import LoginExtra from "@src/views/login/components/login-extra.vue";
 import FpDialog from "@src/components/utils/fp-dialog/fp-dialog.vue";
 import LoginForm from "@src/views/login/components/login-form.vue";
+import RealmSelector from "./components/RealmSelector.vue";
 import HeroTitle from "@src/components/hero-title";
 import { vStagger } from "@src/directives";
 
-let loginCodeRenderer: LoginDiceRenderer | null;
-let diceRotate: boolean = true;
+let loginCodeRenderer: LoginDiceRenderer | null = null;
+let disposed = false;
 const firstClick = ref(false);
-const needLogin = ref(true);
 const showLoginMode = ref(false);
 const showDice = ref(false);
-
+const showServers = ref(false);
+const entering = ref(false);
+const accountName = ref("");
 const showTouristLogin = ref(false);
 const showUserLogin = ref(false);
-
-const touristLoginForm = reactive({
-	userName: "",
-	color: "#000000",
-});
-
+const touristLoginForm = reactive({ userName: "", color: "#4F7CFF" });
 const touristColorInputRef = ref<HTMLInputElement | null>(null);
 
-function handleFirstClick() {
+async function handleFirstClick() {
+	if (firstClick.value) return;
 	firstClick.value = true;
-	let token = localStorage.getItem("token") || "";
-	let userInfo = localStorage.getItem("user") || "";
-	const _needLogin = !token && !userInfo;
-	needLogin.value = _needLogin;
-	if (!_needLogin) {
-		getUserInfoToRoomList();
+	if (!getAccountToken()) {
+		showLoginMode.value = true;
+		return;
+	}
+	await loadAccount();
+}
+
+async function loadAccount() {
+	const account = await ensureValidAuth();
+	if (disposed) return;
+	if (!account) {
+		showLoginMode.value = true;
+		return;
+	}
+	accountName.value = account.username;
+	useUserInfo().setAccountIdentity(account);
+	startTokenRefreshTimer();
+	if (router.currentRoute.value.query.selectRealm !== "1" && getActiveRealm()) {
+		await resumeRealm();
 	} else {
+		showLoginMode.value = false;
+		showServers.value = true;
+	}
+}
+
+function doLogin() { showUserLogin.value = true; }
+async function handleLoginSuccess() {
+	showUserLogin.value = false;
+	showLoginMode.value = false;
+	await loadAccount();
+}
+
+async function enterRealm(serverId: string) {
+	if (entering.value) return;
+	entering.value = true;
+	try {
+		await selectRealm(serverId);
+		if (!disposed) await resumeRealm();
+	} catch {
+		// HTTP errors are shown by the shared client; retain the explicit server selection.
+	} finally {
+		entering.value = false;
+	}
+}
+
+async function resumeRealm() {
+	const active = getActiveRealm();
+	const account = getAccountProfile();
+	const user = getCurrentRealmUser();
+	if (!active || !account || !user) {
+		showServers.value = true;
+		return;
+	}
+	useUserInfo().setRealmIdentity(active, account);
+	await showEntrance(user.avatar);
+}
+
+async function showEntrance(avatar: string) {
+	showLoginMode.value = false;
+	showServers.value = false;
+	showTouristLogin.value = false;
+	showDice.value = true;
+	try {
+		await nextTick();
+		if (disposed) return;
+		const canvas = document.getElementById("dice-canvas") as HTMLCanvasElement | null;
+		if (canvas) {
+			loginCodeRenderer = new LoginDiceRenderer(canvas, true);
+			await loginCodeRenderer.initDice();
+			if (disposed) return;
+			await setTimeOutAsync(500);
+			// The legacy texture loader does not reject on image errors; it must not block navigation.
+			if (avatar && loginCodeRenderer) void loginCodeRenderer.showImage(avatar).catch(() => {});
+		}
+	} catch {
+		// An unavailable WebGL canvas does not prevent entering the lobby.
+	}
+	if (!disposed) await router.replace({ name: "room-router" });
+}
+
+function handleShowTouristLoginDialog() { showTouristLogin.value = true; }
+function handleTouristColorClick() { touristColorInputRef.value?.click(); }
+
+async function handleTouristLogin() {
+	const username = touristLoginForm.userName.trim();
+	if (!username || username.length > 20) {
+		FPMessage({ type: "warning", message: "请输入1-20个字符的本地玩家名字" });
+		return;
+	}
+	const user = { userId: "local-player-" + randomString(12), username, color: touristLoginForm.color, avatar: "" };
+	clearRealmSession();
+	useUserInfo().setLocalIdentity(user);
+	// This profile is cosmetic and is never sent as an online identity.
+	try { localStorage.setItem("monopoly.mine.localUser.v1", JSON.stringify(user)); } catch { /* optional storage */ }
+	await showEntrance("");
+}
+
+async function handleLogout() {
+	entering.value = true;
+	try { await logoutAccount(); } catch { /* local session is cleared even if offline */ }
+	finally {
+		entering.value = false;
+		showServers.value = false;
 		showLoginMode.value = true;
 	}
 }
 
-function doLogin() {
-	showUserLogin.value = true;
-}
-
-function handleLoginSuccess(token: string) {
-	showUserLogin.value = false;
-	localStorage.setItem("token", token);
-	startTokenRefreshTimer();
-	getUserInfoToRoomList();
-}
-
+onMounted(() => {
+	if (router.currentRoute.value.query.selectRealm === "1") void handleFirstClick();
+});
 onBeforeUnmount(() => {
-	loginCodeRenderer && loginCodeRenderer.clear();
+	disposed = true;
+	loginCodeRenderer?.clear();
 	loginCodeRenderer = null;
 });
-
-async function getUserInfoToRoomList() {
-	try {
-		showLoginMode.value = false;
-		showDice.value = true;
-		nextTick(async () => {
-			const canvasEl = document.getElementById("dice-canvas") as HTMLCanvasElement;
-			loginCodeRenderer = new LoginDiceRenderer(canvasEl, diceRotate);
-			await loginCodeRenderer.initDice();
-			let token = localStorage.getItem("token") || "";
-			if (token) {
-				//账号登录 — 先刷新 token，再获取用户信息
-				const userData = await ensureValidAuth();
-				if (userData) {
-					const { id: userId, useraccount, username, avatar, color } = userData;
-					const userInfoStore = useUserInfo();
-					userInfoStore.$patch({ userId, useraccount, username, avatar, color });
-					startTokenRefreshTimer();
-					await setTimeOutAsync(1500);
-					if (loginCodeRenderer) await loginCodeRenderer.showImage(avatar);
-					await setTimeOutAsync(2000, toRoomList);
-					return;
-				} else {
-					showDice.value = false;
-					showLoginMode.value = true;
-					return;
-				}
-			}
-			let userInfo = localStorage.getItem("user") || "";
-			if (userInfo) {
-				//游客登录
-				const { userId, useraccount = "", username, avatar = "", color } = JSON.parse(userInfo);
-				const userInfoStore = useUserInfo();
-				userInfoStore.$patch({ userId, useraccount, username, avatar, color });
-				await setTimeOutAsync(1500);
-				if (loginCodeRenderer) await loginCodeRenderer.showImage("");
-				await setTimeOutAsync(2000, toRoomList);
-				return;
-			}
-		});
-	} catch (e: any) {
-		FPMessage({
-			type: "error",
-			message: e.response?.data?.msg || e.message || e || "在验证身份时发生了未知的错误",
-			onClosed: () => {
-				localStorage.removeItem("token");
-				localStorage.removeItem("user");
-			},
-		});
-	}
-}
-
-function handleShowTouristLoginDialog() {
-	showTouristLogin.value = true;
-}
-
-function handleTouristColorClick() {
-	touristColorInputRef.value?.click();
-}
-
-function handleTouristLogin() {
-	if (!touristLoginForm.userName) {
-		FPMessage({
-			type: "error",
-			message: "不能逃避游客登记📝",
-		});
-		return;
-	}
-	const userInfo = {
-		userId: "temp-player-" + randomString(8),
-		useraccount: "",
-		username: touristLoginForm.userName,
-		color: touristLoginForm.color,
-		avatar: "",
-	};
-	if (touristLoginForm.color == "#000000") {
-		FPMessage({
-			type: "info",
-			message: "如此纯正的黑？你口味挺独特的🧐",
-		});
-	}
-	localStorage.setItem("user", JSON.stringify(userInfo));
-	getUserInfoToRoomList();
-}
-
-function toRoomList() {
-	router.replace({ name: "room-router" });
-}
 </script>
 
 <template>
-	<div @click.once="handleFirstClick" class="login-page">
+	<div @click="handleFirstClick" class="login-page">
 		<HeroTitle text="Mine Monopoly" />
 
 		<div class="front-cover" v-show="!firstClick">
@@ -171,7 +169,7 @@ function toRoomList() {
 			</div>
 			<div @click="handleShowTouristLoginDialog" class="login-mode">
 				<span>我是游客</span>
-				<span>随便玩玩</span>
+				<span>本地单人 / 本地多人</span>
 				<FontAwesomeIcon class="icon" icon="gamepad" />
 			</div>
 
@@ -206,6 +204,8 @@ function toRoomList() {
 				</div>
 			</FpDialog>
 		</div>
+
+		<RealmSelector v-if="showServers" :busy="entering" :account-name="accountName" @select="enterRealm" @resume="resumeRealm" @logout="handleLogout" />
 
 		<FpDialog
 			v-model:visible="showUserLogin"

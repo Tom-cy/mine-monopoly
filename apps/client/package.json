@@ -8,6 +8,7 @@
 	"main": "dist-electron/main.js",
 	"scripts": {
 		"dev": "vite --host",
+		"dev:electron": "vite --mode electron --host",
 		"build": "node ./scripts/extract-changelog.js && vite build && electron-builder",
 		"build:electron": "node ./scripts/extract-changelog.js && vite build && electron-builder",
 		"build:web": "node ./scripts/extract-changelog.js && vite build --mode web",

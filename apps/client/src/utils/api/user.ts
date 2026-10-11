@@ -1,17 +1,14 @@
 import apiClient from "./index";
-import type { ApiResponse } from "@mine-monopoly/types";
+import { updateAccountProfile } from "../auth/session";
+import type { AccountProfile } from "./types";
+import { resolveAccountProfile } from "./resources";
 
-interface UserInfo {
-	username: string;
-	useraccount: string;
-	id: string;
-	avatar: string;
-	color: string;
+export async function getAccountInfo(): Promise<AccountProfile> {
+	const response = await apiClient.get<AccountProfile>("/account/me", { identity: "account" });
+	const profile = resolveAccountProfile(response.data);
+	updateAccountProfile(profile);
+	return profile;
 }
 
-export async function getUserByToken(token: string): Promise<UserInfo> {
-	const response = await apiClient.get<ApiResponse<UserInfo>>("/user/info", {
-		data: { token },
-	});
-	return (response as any).data;
-}
+/** Kept as a call-site alias; authorization always uses the current ACCOUNT token. */
+export const getUserByToken = getAccountInfo;

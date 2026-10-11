@@ -33,8 +33,7 @@ import { WorkerCommType, WorkerState } from "@src/enums/worker";
 import { WorkerCommMsg, HeartbeatData, WorkerStateChangedData, GMAction, GMActionResponseData, GameProcessDebugState } from "@src/interfaces/worker";
 import { useLoading, useDeviceStatus, useSettig } from "@src/store";
 import { randomString } from "@src/utils";
-import { getGameMapById } from "@src/utils/api/map";
-import { setRoomStarted } from "@src/utils/api/room-router";
+import { getFrozenRoomMap } from "@src/utils/api/map";
 import { clearAIRemoteUsageStats, getAIRemoteUsageSnapshot } from "@src/core/ai/remote-usage-stats";
 import { DataConnection } from "peerjs";
 import GameProcessWorker from "@src/core/worker/GameProcessWorker?worker";
@@ -68,6 +67,8 @@ const MAP_CHUNK_BIN_TYPE = 1;
 
 export interface RoomOptions {
 	localParty?: boolean;
+	ownerId?: string;
+	beforeStart?: () => Promise<void>;
 }
 
 export class Room {
@@ -80,6 +81,9 @@ export class Room {
 	private legacyCustomMapClients = new Map<string, string>();
 	private roomId: string;
 	private readonly localParty: boolean;
+	private readonly beforeStart?: () => Promise<void>;
+	private startPending = false;
+	private disposed = false;
 	private userList: Map<string, UserInRoom>;
 	private aiUserList: Map<string, UserInRoomInfo>;
 	private ownerId: string = "";
@@ -150,7 +154,8 @@ export class Room {
 	constructor(roomId: string, options: RoomOptions = {}) {
 		this.roomId = roomId;
 		this.localParty = options.localParty === true;
-		this.ownerId = "";
+		this.ownerId = options.ownerId || "";
+		this.beforeStart = options.beforeStart;
 		this.ownerSpectatorMode = false;
 		this.isStarted = false;
 		this.userList = new Map();
@@ -746,7 +751,7 @@ export class Room {
 				roleId: "",
 				isReady: false,
 			};
-			if (Array.from(this.userList.values()).length === 0) this.ownerId = userInRoom.userId;
+			if (!this.ownerId && this.userList.size === 0) this.ownerId = userInRoom.userId;
 			this.userList.set(user.userId, userInRoom);
 			this.sendToClient(
 				conn,
@@ -864,8 +869,10 @@ export class Room {
 
 	public async handleUserReconnect(userId: string, newCoon: DataConnection, connectionVersion: number) {
 		const oldUser = this.userList.get(userId);
+		if (oldUser) oldUser.socketClient = newCoon;
 		if (oldUser && this.mapInfo) {
-			oldUser.socketClient = newCoon;
+			const isCurrent = () => !this.disposed && this.userList.get(userId) === oldUser &&
+				oldUser.socketClient === newCoon && newCoon.open;
 			this.roomInfoBroadcast();
 
 			// 重连后重新发布当前地图描述或服务器地图。
@@ -878,6 +885,7 @@ export class Room {
 					new Promise((_, reject) => setTimeout(() => reject(new Error("地图资源加载超时")), this.TRANSFER_TIMEOUT)),
 				]);
 			} catch (error) {
+				if (!isCurrent()) return;
 				this.sendToClient(newCoon, SocketMsgType.GameInitAborted, {
 					initSessionId: crypto.randomUUID(),
 					reason: error instanceof Error ? error.message : "地图资源加载失败",
@@ -885,6 +893,7 @@ export class Room {
 				this.handleUserOffline(userId);
 				return;
 			}
+			if (!isCurrent()) return;
 
 			if (this.gameProcessWorker) {
 				this.gameProcessWorker.postMessage(<WorkerCommMsg>{
@@ -906,6 +915,14 @@ export class Room {
 	}
 
 	public async changeMap(data: RoomMapInfo) {
+		if (!this.localParty) {
+			const frozenMap = getFrozenRoomMap(this.roomId);
+			if (!frozenMap || data.from !== "server" || data.data !== frozenMap.id) {
+				this.roomBroadcast({ type: SocketMsgType.MsgNotify, source: SocketMsgSource.Server,
+					data: undefined, msg: { type: "warning", content: "在线房间使用创建时冻结的地图版本，换图请新建房间" } });
+				return;
+			}
+		}
 		const _this = this;
 		this.aiUserList.forEach((user) => {
 			user.isReady = true;
@@ -1177,6 +1194,7 @@ export class Room {
 	}
 
 	public async startGame() {
+		if (this.startPending || this.disposed) return;
 		if (!this.mapInfo) {
 			this.roomBroadcast({
 				type: SocketMsgType.MsgNotify,
@@ -1207,6 +1225,17 @@ export class Room {
 			return;
 		}
 		if (this.isStarted || this.gameProcessWorker) return;
+		this.startPending = true;
+		try {
+			await this.beforeStart?.();
+		} catch {
+			this.roomBroadcast({ type: SocketMsgType.MsgNotify, source: SocketMsgSource.Server,
+				data: undefined, msg: { type: "error", content: "成员连接校验或房主租约未就绪，无法开始游戏" } });
+			return;
+		} finally {
+			this.startPending = false;
+		}
+		if (this.disposed) return;
 		clearAIRemoteUsageStats();
 		this.roomBroadcast({
 			type: SocketMsgType.GameStart,
@@ -1214,11 +1243,6 @@ export class Room {
 			data: undefined,
 		});
 		this.isStarted = true;
-
-		// 上报游戏开始状态和地图信息到服务端
-		const mapId = this.mapInfo?.from === "server" ? this.mapInfo.data : useMapData().id;
-		const mapName = useMapData().info?.name || null;
-		if (!this.localParty) setRoomStarted(this.getRoomId(), true, mapId, mapName);
 
 		// 状态转换: Uninitialized -> Initializing
 		this.transitionTo(WorkerState.Initializing, "开始创建游戏进程");
@@ -1264,7 +1288,7 @@ export class Room {
 	};
 	}
 	private async handleGameOver() {
-		if (!this.localParty) await setRoomStarted(this.getRoomId(), false);
+		// The server admission lifecycle stays started; existing players may replay locally.
 		Array.from(this.userList.values()).forEach((u) => {
 			u.isReady = this.localParty;
 		});
@@ -1579,6 +1603,7 @@ export class Room {
 	}
 
 	public destory() {
+		this.disposed = true;
 		this.clearHeartbeatTimer();
 		this.clearInitTimeout();
 		if (this.gameProcessWorker) {

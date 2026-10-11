@@ -1,56 +1,40 @@
-import apiClient from "./index";
+import apiClient, { MonopolyApiError, startTokenRefreshTimer, stopTokenRefreshTimer } from "./index";
 import { FPMessage } from "@mine-monopoly/ui";
-import { getEncryption } from "@src/utils/encryption";
-import { setToken, setRefreshToken } from "@src/utils/auth";
-import type { ApiResponse } from "@mine-monopoly/types";
+import { clearAccountSession, getAccountToken, saveAccountSession, tokenClaims } from "../auth/session";
+import type { AccountAuth } from "./types";
+import { resolveAccountProfile } from "./resources";
+export { getAccountInfo as getUserInfo } from "./user";
 
-export const getUserInfo = async () => {
-	const response = await apiClient.get<ApiResponse<{
-		id: string;
-		username: string;
-		avatar: string;
-		color: string;
-	}>>("/user/info");
-	return response.data;
-};
-
-export const getEncryptionKey = async () => {
-	const response = await apiClient.get<ApiResponse<string>>("/user/encryption-key");
-	const key = (response as any).data;
-	localStorage.setItem("encryption-key", key);
-	return key;
-};
-
-export const apiLogin = async (useraccount: string, password: string) => {
-	const encryptionPassword = await getEncryption(password);
-	if (!encryptionPassword) {
-		FPMessage({ type: "error", message: "密码加密异常" });
-		return null;
-	}
-
+export async function apiLogin(useraccount: string, password: string): Promise<string | null> {
 	try {
-		const response = await apiClient.post<ApiResponse<{ token: string; refreshToken: string }>>("/user/login", {
-			useraccount,
-			password: encryptionPassword,
-		});
-		const { token, refreshToken } = (response as any).data;
-		if (token) {
-			setToken(token);
-			setRefreshToken(refreshToken);
-		}
-		return token;
+		const response = await apiClient.post<AccountAuth>("/auth/login", { useraccount, password }, { identity: "none" });
+		saveAccountSession({ ...response.data, account: resolveAccountProfile(response.data.account) });
+		startTokenRefreshTimer();
+		return response.data.token;
 	} catch (error) {
+		if (!(error instanceof MonopolyApiError)) FPMessage({ type: "error", message: "登录服务返回的数据无效，请稍后再试" });
 		return null;
 	}
-};
+}
 
-export const apiRegister = async (formData: FormData): Promise<boolean> => {
+export async function apiRegister(formData: FormData): Promise<boolean> {
 	try {
-		await apiClient.post<ApiResponse<void>>("/user/register", formData, {
-			headers: { "Content-Type": "multipart/form-data" },
-		});
+		// The browser supplies the multipart boundary.
+		await apiClient.post("/auth/register", formData, { identity: "none" });
 		return true;
-	} catch (error) {
+	} catch {
 		return false;
 	}
-};
+}
+
+export async function apiLogout() {
+	const sessionId = tokenClaims(getAccountToken() ?? "")?.sessionId;
+	try {
+		await apiClient.post("/auth/logout", undefined, { identity: "account", silent: true });
+	} finally {
+		if (sessionId === tokenClaims(getAccountToken() ?? "")?.sessionId) {
+			stopTokenRefreshTimer();
+			clearAccountSession();
+		}
+	}
+}

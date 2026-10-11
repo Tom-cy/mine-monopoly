@@ -1,7 +1,15 @@
 import { FPMessage } from "@mine-monopoly/ui";
 import { useChat, useGameLog, useLoading, useRoomInfo, useUserInfo, useUtil } from "@src/store";
 import { useGameData } from "@src/store/game";
-import { emitHostPeerId, getRoomSessionStatus, joinRoomApi } from "@src/utils/api/room-router";
+import {
+	getRoomSessionStatus,
+	joinRoomApi,
+	matchRoomApi,
+	leaveRoom,
+	getRegisteredRoom,
+	type RoomAdmission,
+} from "@src/utils/api/room-router";
+import { ensureRealm, getActiveRealm, getCurrentRealmUser } from "@src/utils/auth";
 import { WebRtcSessionManager, SessionSendResult } from "@src/core/network/WebRtcSessionManager";
 import {
 	AIDecisionConfig,
@@ -22,7 +30,6 @@ type MonopolyClientOptions = {
 		port: number;
 	};
 };
-
 
 export class MonopolyClient {
 	private static instance: MonopolyClient | null;
@@ -67,7 +74,9 @@ export class MonopolyClient {
 				}
 				handleServerSocketMessage(data, this);
 			},
-			onHeartbeat: (ping) => { useUtil().ping = ping; },
+			onHeartbeat: (ping) => {
+				useUtil().ping = ping;
+			},
 			onReconnectAttempt: (attempt, strategy) => {
 				useUtil().connectionReconnectAttempt = attempt;
 				useUtil().connectionPolicy = strategy === "force-relay" ? "relay" : "auto";
@@ -75,7 +84,14 @@ export class MonopolyClient {
 			onStateChange: (state, detail) => {
 				useUtil().connectionStatusText = state;
 				useUtil().connectionStatusReason = detail || "";
-				useUtil().connectionMode = state === "connected" ? (this.session.isLocalParty() ? "local" : this.session.getConnectionStrategy() === "force-relay" ? "relay" : "p2p") : "unknown";
+				useUtil().connectionMode =
+					state === "connected"
+						? this.session.isLocalParty()
+							? "local"
+							: this.session.getConnectionStrategy() === "force-relay"
+								? "relay"
+								: "p2p"
+						: "unknown";
 			},
 			onHostClosed: (status) => {
 				this.handleDisconnect({
@@ -89,33 +105,23 @@ export class MonopolyClient {
 		});
 	}
 
-	public async joinRoom(roomId: string): Promise<boolean> {
+	public async joinRoom(
+		roomCode: string,
+		options: { mapId?: string; capacity?: number; privateRoom?: boolean } = {},
+	): Promise<boolean> {
 		connectionDiagnostics.reset();
 		connectionDiagnostics.stageStart("joinRoom_Total");
 		try {
 			// 上一局若在暂停中异常结束，加入新房间时必须清理本地暂停 UI 状态。
 			useUtil().gamePaused = false;
-			const response = await joinRoomApi(roomId);
-			const data = response.data;
-			this.session.setIceServers(data.iceServers || []);
-			let hostPeerId = data.hostPeerId;
-			if (data.needCreate) {
-				useLoading().showLoading("正在创建主机...");
-				const user = useUserInfo();
-				hostPeerId = await this.session.createHost(roomId, data.heartbeatIntervalMs ?? data.deleteIntervalMs, {
-					hostLeaseToken: data.hostLeaseToken,
-					hostEpoch: data.hostEpoch,
-					hostName: user.username,
-					hostId: user.userId,
-				});
-				await emitHostPeerId(roomId, hostPeerId, user.username, user.userId, data.hostLeaseToken);
-			}
-			if (!hostPeerId) throw new Error("房主尚未就绪，请稍后重试");
-			useLoading().showLoading("正在建立连接...");
-			await this.session.connect(roomId, hostPeerId, () => useRoomInfo().isReady);
+			await ensureRealm();
+			const peerId = await this.session.preparePeerId();
+			const data = await joinRoomApi({ roomCode, requestId: crypto.randomUUID(), peerId, ...options });
+			await this.connectAdmission(data);
 			connectionDiagnostics.stageEnd("joinRoom_Total");
 			return true;
 		} catch (error: any) {
+			if (error?.staleIdentity) return false;
 			// 优先展示服务端返回的友好提示(如"房间已过期/已关闭/房主租约无效"),避免暴露 axios 原文
 			const serverMsg = error?.response?.data?.msg;
 			const message = serverMsg || error?.message || "服务器连接失败";
@@ -125,11 +131,84 @@ export class MonopolyClient {
 		}
 	}
 
+	public async matchRoom(): Promise<boolean> {
+		await ensureRealm();
+		const peerId = await this.session.preparePeerId();
+		try {
+			const admission = await matchRoomApi({ requestId: crypto.randomUUID(), peerId });
+			if (!admission.matched) {
+				FPMessage({ type: "info", message: "当前区服暂无可加入的公开房间，可选择地图新建房间" });
+				return false;
+			}
+			await this.connectAdmission(admission);
+			return true;
+		} catch (error: any) {
+			if (error?.staleIdentity) return false;
+			FPMessage({ type: "error", message: error?.message || "匹配房间失败" });
+			return false;
+		}
+	}
+
+	private async connectAdmission(data: RoomAdmission): Promise<void> {
+		const room = data.room;
+		if (!room || !data.matched) throw new Error("服务器未返回房间准入信息");
+		if (!getRegisteredRoom(room.id)) {
+			throw Object.assign(new Error("区服身份已变更，请重新入房"), { code: 46002, staleIdentity: true });
+		}
+		const realmSessionId = getActiveRealm()!.sessionId;
+		const user = getCurrentRealmUser();
+		if (!user) throw new Error("请先登录并选择区服");
+		useUserInfo().$patch({
+			userId: user.id,
+			username: user.username,
+			avatar: user.avatar,
+			color: user.color,
+			useraccount: user.useraccount,
+		});
+		useRoomInfo().$patch({
+			roomId: room.id,
+			roomCode: room.roomCode,
+			roomSessionId: room.roomSessionId,
+			hostEpoch: room.hostEpoch,
+			ownerId: room.hostRoleId,
+			ownerName: room.hostName,
+			mapId: room.mapId,
+		});
+		this.session.setIceServers(data.iceServers || []);
+		let hostPeerId = data.hostPeerId;
+		try {
+			if (data.needCreate) {
+				if (!data.hostLeaseToken) throw new Error("服务器未签发房主租约");
+				useLoading().showLoading("正在创建主机...");
+				hostPeerId = await this.session.createHost(room.id, room.heartbeatIntervalMs, {
+					hostLeaseToken: data.hostLeaseToken,
+					hostEpoch: room.hostEpoch,
+					roomSessionId: room.roomSessionId,
+					hostName: room.hostName,
+					hostId: room.hostRoleId,
+					capacity: room.capacity,
+				});
+			}
+			if (!hostPeerId) throw new Error("房主尚未就绪，请稍后重试");
+			useLoading().showLoading("正在建立连接...");
+			await this.session.connect(room.id, hostPeerId, () => useRoomInfo().isReady);
+		} catch (error) {
+			await this.session.close();
+			await leaveRoom(room.id).catch(() => {});
+			if (getActiveRealm()?.sessionId === realmSessionId && useRoomInfo().roomSessionId === room.roomSessionId) {
+				useRoomInfo().$reset();
+			}
+			throw error;
+		}
+	}
+
 	public async createLocalParty(defaultName: string): Promise<void> {
 		useUtil().gamePaused = false;
 		await this.session.createLocalParty(defaultName);
 	}
-	public addLocalPartyPlayer(): Promise<{ success: boolean; error?: string }> { return this.session.addLocalPartyPlayer(); }
+	public addLocalPartyPlayer(): Promise<{ success: boolean; error?: string }> {
+		return this.session.addLocalPartyPlayer();
+	}
 	public updateLocalPartyPlayerName(userId: string, username: string): { success: boolean; error?: string } {
 		return this.session.updateLocalPartyPlayerName(userId, username);
 	}
@@ -137,19 +216,38 @@ export class MonopolyClient {
 		return this.session.removeLocalPartyPlayer(userId);
 	}
 
-	public cancelReconnection(): void { this.session.cancelReconnection(); }
-	public isReconnecting(): boolean { return this.session.isReconnecting(); }
-	public handleHeartReply(): void { this.session.handleHeartbeatReply(); }
-	public initHeartBeat(): void {}
-	public pauseHeartBeat(): void { this.session.pauseHeartbeat(); }
-	public resumeHeartBeat(): void { this.session.resumeHeartbeat(); }
-	public sendLoadingStarted(): void {
-		void this.sendMsg({ type: SocketMsgType.Operation, source: SocketMsgSource.Client, data: { operateType: OperateType.LoadingStarted, data: undefined } });
+	public cancelReconnection(): void {
+		this.session.cancelReconnection();
 	}
-	public registerGameInitSession(initSessionId?: string): void { this.currentInitSessionId = initSessionId || null; }
+	public isReconnecting(): boolean {
+		return this.session.isReconnecting();
+	}
+	public handleHeartReply(): void {
+		this.session.handleHeartbeatReply();
+	}
+	public initHeartBeat(): void {}
+	public pauseHeartBeat(): void {
+		this.session.pauseHeartbeat();
+	}
+	public resumeHeartBeat(): void {
+		this.session.resumeHeartbeat();
+	}
+	public sendLoadingStarted(): void {
+		void this.sendMsg({
+			type: SocketMsgType.Operation,
+			source: SocketMsgSource.Client,
+			data: { operateType: OperateType.LoadingStarted, data: undefined },
+		});
+	}
+	public registerGameInitSession(initSessionId?: string): void {
+		this.currentInitSessionId = initSessionId || null;
+	}
 	private handleDisconnect(notification: { type: "info" | "success" | "warning" | "error"; content: string }): void {
 		useUtil().gamePaused = false;
-		useGameData().$reset(); useRoomInfo().$reset(); useChat().$reset(); useGameLog().$reset();
+		useGameData().$reset();
+		useRoomInfo().$reset();
+		useChat().$reset();
+		useGameLog().$reset();
 		this.destory();
 		void router.replace({ name: "room-router" }).finally(() => {
 			FPMessage({ type: notification.type, message: notification.content });
@@ -175,28 +273,45 @@ export class MonopolyClient {
 	}
 
 	public changeColorForUser(userId: string, newColor: string): { success: boolean; error?: string } {
-		if (this.session.isLocalParty() || this.session.isAiPlayer(userId)) return this.session.changeColorForUser(userId, newColor);
-		if (userId === useUserInfo().userId) { this.changeColor(newColor); return { success: true }; }
+		if (this.session.isLocalParty() || this.session.isAiPlayer(userId))
+			return this.session.changeColorForUser(userId, newColor);
+		if (userId === useUserInfo().userId) {
+			this.changeColor(newColor);
+			return { success: true };
+		}
 		return { success: false, error: "当前只支持房主修改 AI 玩家颜色" };
 	}
 
 	public kickOut(playerId: string) {
-		if (this.session.isAiPlayer(playerId)) { this.session.removeAIPlayer(playerId); return; }
+		if (this.session.isAiPlayer(playerId)) {
+			this.session.removeAIPlayer(playerId);
+			return;
+		}
 		if (this.session.isLocalParty()) return this.session.removeLocalPartyPlayer(playerId);
 		void this.sendMsg({ type: SocketMsgType.KickOut, source: SocketMsgSource.Client, data: playerId });
 	}
 
-	public addAIPlayer(): { success: boolean; error?: string } { return this.session.addAIPlayer(); }
-
-	public randomizeAIRoles(): { success: boolean; error?: string } {
-		return this.session.randomizeAIRoles() ? { success: true } : { success: false, error: "当前没有可随机分配的 AI 玩家或地图没有角色" };
+	public addAIPlayer(): { success: boolean; error?: string } {
+		return this.session.addAIPlayer();
 	}
 
-	public setSpectatorMode(enabled: boolean): { success: boolean; error?: string } { return this.session.setSpectatorMode(enabled); }
+	public randomizeAIRoles(): { success: boolean; error?: string } {
+		return this.session.randomizeAIRoles()
+			? { success: true }
+			: { success: false, error: "当前没有可随机分配的 AI 玩家或地图没有角色" };
+	}
+
+	public setSpectatorMode(enabled: boolean): { success: boolean; error?: string } {
+		return this.session.setSpectatorMode(enabled);
+	}
 
 	public changeRoleForUser(userId: string, roleId: string): { success: boolean; error?: string } {
-		if (this.session.isLocalParty() || this.session.isAiPlayer(userId)) return this.session.changeRoleForUser(userId, roleId);
-		if (userId === useUserInfo().userId) { this.changeRole(roleId); return { success: true }; }
+		if (this.session.isLocalParty() || this.session.isAiPlayer(userId))
+			return this.session.changeRoleForUser(userId, roleId);
+		if (userId === useUserInfo().userId) {
+			this.changeRole(roleId);
+			return { success: true };
+		}
 		return { success: false, error: "当前只支持房主修改 AI 玩家角色" };
 	}
 
@@ -266,8 +381,14 @@ export class MonopolyClient {
 		});
 		(window as any).__MM_TEST__ = {
 			help: [
-				"state()", "pause()", "resume()", "roomStatus()", "sendHostHeartbeat()",
-				"dropP2pConnection()", "reconnect()", "gameProcessState()",
+				"state()",
+				"pause()",
+				"resume()",
+				"roomStatus()",
+				"sendHostHeartbeat()",
+				"dropP2pConnection()",
+				"reconnect()",
+				"gameProcessState()",
 			],
 			state: getClientState,
 			pause: () => this.pauseGame(),
@@ -275,7 +396,7 @@ export class MonopolyClient {
 			roomStatus: async () => {
 				const roomId = useRoomInfo().roomId;
 				if (!roomId) throw new Error("当前未加入房间");
-				return (await getRoomSessionStatus(roomId)).data;
+				return await getRoomSessionStatus(roomId);
 			},
 			sendHostHeartbeat: async () => {
 				if (!this.session.hasLocalHost()) {
@@ -305,13 +426,27 @@ export class MonopolyClient {
 		};
 	}
 
-	public requestSave(): void { this.session.requestSave(); }
-	public async loadSave(record: any, usePrevious: boolean = false): Promise<{ success: boolean; error?: string }> { return this.session.loadSave(record, usePrevious); }
+	public requestSave(): void {
+		this.session.requestSave();
+	}
+	public async loadSave(record: any, usePrevious: boolean = false): Promise<{ success: boolean; error?: string }> {
+		return this.session.loadSave(record, usePrevious);
+	}
 	public gameInitFinished() {
-		return this.sendMsg({ type: SocketMsgType.Operation, source: SocketMsgSource.Client, data: { operateType: OperateType.GameInitFinished, data: undefined }, extra: { initSessionId: this.currentInitSessionId, initStatus: "ready", messageId: crypto.randomUUID() } });
+		return this.sendMsg({
+			type: SocketMsgType.Operation,
+			source: SocketMsgSource.Client,
+			data: { operateType: OperateType.GameInitFinished, data: undefined },
+			extra: { initSessionId: this.currentInitSessionId, initStatus: "ready", messageId: crypto.randomUUID() },
+		});
 	}
 	public gameInitFailed(reason: string) {
-		return this.sendMsg({ type: SocketMsgType.Operation, source: SocketMsgSource.Client, data: { operateType: OperateType.GameInitFinished, data: undefined }, extra: { initSessionId: this.currentInitSessionId, initStatus: "failed", reason, messageId: crypto.randomUUID() } });
+		return this.sendMsg({
+			type: SocketMsgType.Operation,
+			source: SocketMsgSource.Client,
+			data: { operateType: OperateType.GameInitFinished, data: undefined },
+			extra: { initSessionId: this.currentInitSessionId, initStatus: "failed", reason, messageId: crypto.randomUUID() },
+		});
 	}
 
 	public chooseMapPath(requestId: string, pathId: string) {
@@ -381,7 +516,9 @@ export class MonopolyClient {
 		return result;
 	}
 
-	public destory() { void this.session.close(); }
+	public destory() {
+		void this.session.close();
+	}
 
 	public static destoryInstance() {
 		if (this.instance) {
@@ -403,8 +540,7 @@ function useMonopolyClient(options?: MonopolyClientOptions) {
 function destoryMonopolyClient() {
 	try {
 		MonopolyClient.getInstance() && MonopolyClient.destoryInstance();
-	} catch (e) {
-	}
+	} catch (e) {}
 }
 
 export { useMonopolyClient, destoryMonopolyClient };

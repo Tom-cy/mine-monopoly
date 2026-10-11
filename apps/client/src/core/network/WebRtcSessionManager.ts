@@ -11,8 +11,9 @@ import {
 import { PeerClient } from "@src/core/monopoly-client/PeerClient";
 import { ReconnectionManager } from "@src/core/monopoly-client/ReconnectionManager";
 import { MonopolyHost } from "@src/core/monopoly-host/MonopolyHost";
-import { getRoomSessionStatus } from "@src/utils/api/room-router";
-import { useUserInfo } from "@src/store";
+import { emitMemberHeart, getRoomSessionStatus, issueRoomTicket, leaveRoom } from "@src/utils/api/room-router";
+import { getCurrentRealmUser } from "@src/utils/auth/session";
+import { backendErrorCode, isStaleBackendIdentity } from "./peer-admission";
 import { LocalPartySession } from "@src/core/local-party/LocalPartySession";
 
 export type WebRtcSessionState =
@@ -31,6 +32,8 @@ export type SessionSendResult =
 export interface HostSessionRegistration {
 	hostLeaseToken: string;
 	hostEpoch: number;
+	roomSessionId: string;
+	capacity: number;
 	/** 在创建主机时冻结身份信息，供服务端重启后的租约 reclaim 使用。 */
 	hostName: string;
 	hostId: string;
@@ -88,6 +91,16 @@ class HostRoomClosedError extends Error {
 		super(status === "closed" ? "房主已退出，房间已关闭" : "房间已过期");
 	}
 }
+class RoomIdentityExpiredError extends Error {
+	public constructor(public readonly staleIdentity = false) { super("区服身份或房间成员席位已失效，请重新入房"); }
+}
+
+type JoinAcknowledgement = {
+	connection: DataConnection;
+	resolve: () => void;
+	reject: (error: Error) => void;
+	timer: ReturnType<typeof setTimeout>;
+};
 
 export class WebRtcSessionManager {
 	private peerClient: PeerClient | null = null;
@@ -106,6 +119,16 @@ export class WebRtcSessionManager {
 	private strategy: ConnectionStrategy = "prefer-p2p";
 	private peerStrategy: ConnectionStrategy | null = null;
 	private explicitClose = false;
+	private lifecycleGeneration = 0;
+	private memberPeerId: string | null = null;
+	private memberHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+	private memberHeartbeatRequest: Promise<void> | null = null;
+	private connectionAttempt: { generation: number; request: Promise<void> } | null = null;
+	private pendingJoin: JoinAcknowledgement | null = null;
+	private closeRequest: Promise<void> | null = null;
+	private readonly unload = () => {
+		if (this.reconnectContext && !this.host) void leaveRoom(this.reconnectContext.roomId, true).catch(() => undefined);
+	};
 	private listeners = new Map<WebRtcSessionEvent, Set<(payload: unknown) => void>>();
 
 	public constructor(private readonly options: WebRtcSessionManagerOptions) {}
@@ -171,15 +194,21 @@ export class WebRtcSessionManager {
 	public setIceServers(iceServers: RTCIceServer[]): void {
 		this.iceServers = iceServers;
 	}
+	/** Reserve the ID before HTTP admission; create Peer only after obtaining this room's ICE configuration. */
+	public async preparePeerId(): Promise<string> {
+		return this.memberPeerId ?? (this.memberPeerId = crypto.randomUUID());
+	}
 
 	public async createHost(
 		roomId: string,
 		deleteIntervalMs: number,
 		registration: HostSessionRegistration,
 	): Promise<string> {
+		if (this.closeRequest) await this.closeRequest;
 		this.transition("hosting");
 		this.explicitClose = false;
-		this.host = await MonopolyHost.create(
+		const generation = this.lifecycleGeneration;
+		const host = await MonopolyHost.create(
 			roomId,
 			this.options.iceServer.host,
 			this.options.iceServer.port,
@@ -187,20 +216,28 @@ export class WebRtcSessionManager {
 			this.iceServers,
 			registration,
 		);
-		this.host.addDestoryListener(() => {
-			this.host = null;
+		if (this.explicitClose || generation !== this.lifecycleGeneration) {
+			await host.close();
+			throw new Error("房主创建已取消");
+		}
+		this.host = host;
+		host.addDestoryListener(() => {
+			if (this.host === host) this.host = null;
 		});
-		return this.host.getPeerId();
+		return host.getPeerId();
 	}
 
-	public async connect(roomId: string, hostPeerId: string, isReady: () => boolean): Promise<void> {
+	public async connect(roomId: string, hostPeerId: string, isReady: () => boolean, peerId?: string): Promise<void> {
+		if (this.closeRequest) await this.closeRequest;
 		this.stopReconnection();
 		this.explicitClose = false;
+		if (peerId) this.memberPeerId = peerId;
+		const generation = ++this.lifecycleGeneration;
 		this.reconnectContext = { roomId, hostPeerId, isReady };
+		window.addEventListener("beforeunload", this.unload);
 		this.transition("connecting");
-		await this.openConnection(hostPeerId);
-		const result = this.sendJoinRoom(isReady());
-		if (!result.ok) throw new Error("加入房间消息发送失败");
+		await this.establishConnection(this.reconnectContext, generation);
+		this.assertLifecycle(generation);
 		this.transition("connected");
 	}
 
@@ -303,55 +340,121 @@ export class WebRtcSessionManager {
 	}
 
 	public async close(): Promise<void> {
-		if (this.state === "closing") return;
+		if (this.closeRequest) return this.closeRequest;
 		if (this.state === "closed" && !this.connection && !this.peerClient && !this.host && !this.localPartySession && !this.reconnectContext) return;
 		this.explicitClose = true;
+		++this.lifecycleGeneration;
 		this.transition("closing");
 		this.stopReconnection();
 		this.stopHeartbeat();
+		this.stopMemberHeartbeat();
+		window.removeEventListener("beforeunload", this.unload);
 		this.disposeConnection();
 		this.peerClient?.destory();
 		this.peerClient = null;
 		this.peerStrategy = null;
-		this.host?.destory();
+		this.memberPeerId = null;
+		const host = this.host;
+		const roomId = this.reconnectContext?.roomId;
 		this.localPartySession?.destroy();
 		this.localPartySession = null;
 		this.host = null;
 		this.reconnectContext = null;
-		this.transition("closed");
+		this.closeRequest = (async () => {
+			if (host) await host.close();
+			else if (roomId) await leaveRoom(roomId).catch(() => undefined);
+			this.transition("closed");
+		})().finally(() => { this.closeRequest = null; });
+		return this.closeRequest;
 	}
 
 	private async reconnectNow(): Promise<void> {
 		const context = this.reconnectContext;
 		if (!context) throw new Error("缺少重连上下文");
-		// 优先直接重连主机 P2P(P2P 才是游戏的真实状态);只有直连失败时才查服务端注册表，
-		// 避免"游戏还活着、但服务端房间已过期"导致玩家被误判踢出
-		try {
-			await this.openConnection(context.hostPeerId);
-		} catch (error) {
+		const generation = this.lifecycleGeneration;
+		if (this.connectionAttempt?.generation === generation) return this.connectionAttempt.request;
+		const request = (async () => {
 			await this.assertRoomStillActive(context.roomId);
-			await this.openConnection(context.hostPeerId);
-		}
-		const result = this.sendJoinRoom(context.isReady());
-		if (!result.ok) throw new Error("重连加入消息发送失败");
+			this.assertLifecycle(generation);
+			await this.establishConnection(context, generation);
+		})().catch((error: unknown) => {
+			this.throwLifecycleError(error);
+		}).finally(() => {
+			if (this.connectionAttempt?.request === request) this.connectionAttempt = null;
+		});
+		this.connectionAttempt = { generation, request };
+		return request;
 	}
 
-	private async openConnection(hostPeerId: string): Promise<void> {
+	private async establishConnection(context: ReconnectContext, generation: number): Promise<void> {
+		await this.openConnection(context.roomId, context.hostPeerId, generation);
+		this.assertLifecycle(generation);
+		const connection = this.connection!;
+		const acknowledged = new Promise<void>((resolve, reject) => {
+			const timer = setTimeout(() => this.rejectPendingJoin(new Error("房主成员校验超时")), 15000);
+			this.pendingJoin = { connection, resolve, reject, timer };
+		});
+		if (!this.sendJoinRoom(context.isReady()).ok) this.rejectPendingJoin(new Error("加入房间消息发送失败"));
+		await acknowledged;
+		this.assertLifecycle(generation);
+		this.startMemberHeartbeat(context.roomId, generation);
+	}
+
+	private assertLifecycle(generation: number): void {
+		if (this.explicitClose || generation !== this.lifecycleGeneration) throw new Error("房间连接已取消");
+	}
+
+	private throwLifecycleError(error: unknown): never {
+		const code = backendErrorCode(error);
+		if (code === 46022) throw new HostRoomClosedError("expired");
+		if (code !== undefined && [46001, 46002, 46003, 46004, 46005, 46010].includes(code)) throw new RoomIdentityExpiredError(isStaleBackendIdentity(error));
+		throw error;
+	}
+
+	private rejectPendingJoin(error: Error): void {
+		const pending = this.pendingJoin;
+		if (!pending) return;
+		this.pendingJoin = null;
+		clearTimeout(pending.timer);
+		pending.reject(error);
+	}
+
+	private async openConnection(roomId: string, hostPeerId: string, generation: number): Promise<void> {
 		this.disposeConnection();
-		await this.ensurePeerClient();
-		const { conn } = await this.peerClient!.linkToHost(hostPeerId);
+		await this.ensurePeerClient(generation);
+		this.assertLifecycle(generation);
+		const peer = this.peerClient!;
+		const ticket = await issueRoomTicket(roomId, peer.getPeerId());
+		this.assertLifecycle(generation);
+		const { conn } = await peer.linkToHost(hostPeerId, ticket.ticket);
+		if (this.explicitClose || generation !== this.lifecycleGeneration || this.peerClient !== peer) {
+			conn.close();
+			throw new Error("房间连接已取消");
+		}
 		this.bindConnection(conn);
 	}
 
-	private async ensurePeerClient(): Promise<void> {
+	private async ensurePeerClient(generation: number): Promise<void> {
 		if (this.peerClient && this.peerStrategy === this.strategy) return;
-		this.peerClient?.destory();
-		this.peerClient = await PeerClient.create(
+		if (this.peerClient) {
+			this.peerClient.destory();
+			this.peerClient = null;
+			// The new transport receives a fresh ticket, so a new ID avoids a stale signaling registration.
+			this.memberPeerId = crypto.randomUUID();
+		}
+		const strategy = this.strategy;
+		const peer = await PeerClient.create(
 			this.options.iceServer.host,
 			this.options.iceServer.port,
 			this.buildRtcConfig(),
+			await this.preparePeerId(),
 		);
-		this.peerStrategy = this.strategy;
+		if (this.explicitClose || generation !== this.lifecycleGeneration) {
+			peer.destory();
+			throw new Error("信令连接已取消");
+		}
+		this.peerClient = peer;
+		this.peerStrategy = strategy;
 	}
 	private buildRtcConfig(): RTCConfiguration {
 		return { iceServers: this.iceServers, ...(this.strategy === "force-relay" ? { iceTransportPolicy: "relay" } : {}) };
@@ -377,10 +480,18 @@ export class WebRtcSessionManager {
 				const message = JSON.parse(String(payload), (_key, value) =>
 					value === "Infinity" ? Infinity : value === "-Infinity" ? -Infinity : value,
 				) as ServerSocketMessage;
+				if (!message || message.source !== SocketMsgSource.Server) return;
+				if (message.type === SocketMsgType.JoinRoom && this.pendingJoin?.connection === connection) {
+					const pending = this.pendingJoin;
+					this.pendingJoin = null;
+					clearTimeout(pending.timer);
+					if (message.msg?.type === "error") pending.reject(new Error(message.msg.content));
+					else pending.resolve();
+				}
 				this.options.onMessage(message);
 				this.emit("message", message);
-			} catch (error) {
-				console.error("[WebRtcSessionManager] 无法解析主机消息", error);
+			} catch {
+				// Invalid transport payloads cannot alter the established room identity.
 			}
 		});
 		connection.on("close", () => this.handleConnectionLoss(connection, generation, "连接已关闭"));
@@ -391,9 +502,36 @@ export class WebRtcSessionManager {
 
 	private handleConnectionLoss(connection: DataConnection, generation: number, detail: string): void {
 		if (!this.isCurrentConnection(connection, generation) || this.explicitClose) return;
+		this.rejectPendingJoin(new Error(detail));
 		this.connection = null;
 		this.stopHeartbeat();
 		this.startReconnection(detail);
+	}
+	private startMemberHeartbeat(roomId: string, generation: number): void {
+		this.stopMemberHeartbeat();
+		const renew = () => {
+			if (this.explicitClose || generation !== this.lifecycleGeneration || this.memberHeartbeatRequest) return;
+			const request = emitMemberHeart(roomId).catch((error: unknown) => {
+				if (this.explicitClose || generation !== this.lifecycleGeneration) return;
+				const code = backendErrorCode(error);
+				if (code === undefined || ![46001, 46002, 46003, 46004, 46005, 46010, 46022].includes(code)) return;
+				const closingGeneration = this.lifecycleGeneration + 1;
+				void this.close().then(() => {
+					if (this.lifecycleGeneration !== closingGeneration || !this.explicitClose || isStaleBackendIdentity(error)) return;
+					this.options.onHostClosed?.(code === 46022 ? "expired" : "closed");
+					this.emit("host-closed", code === 46022 ? "expired" : "closed");
+				});
+			}).finally(() => { if (this.memberHeartbeatRequest === request) this.memberHeartbeatRequest = null; });
+			this.memberHeartbeatRequest = request;
+		};
+		// HTTP liveness continues during map loading and transport recovery.
+		renew();
+		this.memberHeartbeatTimer = setInterval(renew, 10000);
+	}
+	private stopMemberHeartbeat(): void {
+		if (this.memberHeartbeatTimer) clearInterval(this.memberHeartbeatTimer);
+		this.memberHeartbeatTimer = null;
+		this.memberHeartbeatRequest = null;
 	}
 	private startHeartbeat(): void {
 		this.stopHeartbeat();
@@ -438,22 +576,30 @@ export class WebRtcSessionManager {
 				this.options.onReconnectAttempt?.(attempt, this.strategy);
 				this.emit("reconnect-attempt", { attempt, strategy: this.strategy });
 			},
-			onSuccess: () => this.transition("connected"),
+			onSuccess: () => { if (!this.explicitClose) this.transition("connected"); },
 			onFail: (error) => {
+				if (this.explicitClose) return;
 				this.reconnectManager = null;
 				if (error instanceof HostRoomClosedError) {
-					this.transition("closed", error.message);
+					void this.close();
 					this.options.onHostClosed?.(error.status);
 					this.emit("host-closed", error.status);
+					return;
+				}
+				if (error instanceof RoomIdentityExpiredError) {
+					void this.close();
+					if (error.staleIdentity) return;
+					this.options.onHostClosed?.("closed");
+					this.emit("host-closed", "closed");
 					return;
 				}
 				this.transition("failed", error.message);
 			},
 			onCancel: () => {
-				this.transition("closed", "用户取消重连");
+				void this.close();
 				this.options.onReconnectCancelled?.();
 			},
-			shouldRetry: (error) => !(error instanceof HostRoomClosedError),
+			shouldRetry: (error) => !(error instanceof HostRoomClosedError) && !(error instanceof RoomIdentityExpiredError),
 		});
 		this.reconnectManager.start();
 	}
@@ -462,14 +608,14 @@ export class WebRtcSessionManager {
 		this.reconnectManager = null;
 	}
 	private async assertRoomStillActive(roomId: string): Promise<void> {
-		const response = await getRoomSessionStatus(roomId);
-		const status = response.data.status;
+		const status = (await getRoomSessionStatus(roomId)).state;
 		if (status === "closed" || status === "expired") throw new HostRoomClosedError(status);
 		// grace(宽限期)与 active 均视为可重连
 		if (status !== "active" && status !== "grace") throw new Error("房间会话不可用");
 	}
 	private sendJoinRoom(isReady: boolean): SessionSendResult {
-		const user = useUserInfo();
+		const user = getCurrentRealmUser();
+		if (!user) return { ok: false, reason: "not-connected" };
 		return this.send({
 			type: SocketMsgType.JoinRoom,
 			source: SocketMsgSource.Client,
@@ -477,6 +623,7 @@ export class WebRtcSessionManager {
 		});
 	}
 	private disposeConnection(): void {
+		this.rejectPendingJoin(new Error("连接已替换或关闭"));
 		if (!this.connection) return;
 		this.connectionGeneration++;
 		this.connection.removeAllListeners();

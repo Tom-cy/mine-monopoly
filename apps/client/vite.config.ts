@@ -1,13 +1,13 @@
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv, type ProxyOptions } from "vite";
 import vue from "@vitejs/plugin-vue";
 import path from "path";
 import { readFileSync } from "node:fs";
+import { Agent as HttpsAgent } from "node:https";
 import viteCompression from "vite-plugin-compression";
 import { visualizer } from "rollup-plugin-visualizer";
 import electron from "vite-plugin-electron/simple";
 import pkg from "./package.json";
 import generateMonacoDTS from "./plugins/vite-plugin-generate-monaco-dts";
-import { envPlugin } from "@mine-monopoly/env/vite-plugin";
 
 const APP_VERSION_SHORT = pkg.version.split(".").slice(0, 2).join(".");
 const updatePolicy = JSON.parse(
@@ -17,17 +17,35 @@ const MIN_NATIVE_VERSION = updatePolicy.minNativeVersion || "0.0.0";
 
 // https://vitejs.dev/config/
 export default defineConfig(({ command, mode }) => {
+	const env = loadEnv(mode, __dirname);
 	const isCheck = mode === "check";
 	const isCapacitor = mode === "capacitor";
-	const isWeb = mode === "web";
+	const isWeb = mode === "web" || (command === "serve" && mode !== "electron");
 	const buildTarget = isCapacitor ? "chrome64" : isWeb ? "safari13" : "es2022";
-	const webBasePathRaw = process.env.VITE_WEB_BASE_PATH?.trim() || "/monopoly/";
+	const webBasePathRaw = env.VITE_WEB_BASE_PATH?.trim() || "/monopoly/";
 	const webBasePath = webBasePathRaw.startsWith("/")
 		? (webBasePathRaw.endsWith("/") ? webBasePathRaw : `${webBasePathRaw}/`)
 		: `/${webBasePathRaw.endsWith("/") ? webBasePathRaw : `${webBasePathRaw}/`}`;
 
+	const proxy: Record<string, ProxyOptions> = {};
+	if (command === "serve") {
+		const target = env.VITE_BACKEND_URL || "https://192.168.1.3:7443";
+		const caFile = env.VITE_DEV_PROXY_CA_FILE || "../../../GameBackend/tools/dev/classic-wss/local/classic-sit-server.pem";
+		proxy["/monopoly-api"] = {
+			target,
+			changeOrigin: true,
+			secure: true,
+			agent: target.startsWith("https:") ? new HttpsAgent({ ca: readFileSync(path.resolve(__dirname, caFile)) }) : undefined,
+		};
+		proxy["/monopoly-mine-peer"] = {
+			target: env.VITE_PEER_PROXY_TARGET || "http://127.0.0.1:9003",
+			changeOrigin: true,
+			ws: true,
+		};
+	}
+
 	return {
-		base: isWeb ? webBasePath : "./",
+		base: command === "serve" ? "/" : isWeb ? webBasePath : "./",
 		assetsInclude: ["**/*.d.ts"],
 		define: {
 			// 全局常量注入
@@ -35,6 +53,8 @@ export default defineConfig(({ command, mode }) => {
 			__BUILD_TIME__: JSON.stringify(new Date().toISOString()),
 			__COMPATIBLE_VERSION__: JSON.stringify(APP_VERSION_SHORT),
 			__MIN_NATIVE_VERSION__: JSON.stringify(MIN_NATIVE_VERSION),
+			// 只注入地图格式配置，不向浏览器暴露根目录 .env 或进程环境。
+			__ENV_VARS__: JSON.stringify({ MAP_ENCRYPT_KEY: env.VITE_MAP_ENCRYPT_KEY || "" }),
 		},
 		plugins: [
 			vue(),
@@ -42,10 +62,6 @@ export default defineConfig(({ command, mode }) => {
 			// Capacitor 不需要 gzip（Android 会把 .gz 当重复资源报错）
 			!isCapacitor && viteCompression({
 				threshold: 10240, // 只压缩大于 10KB 的文件
-			}),
-			envPlugin({
-				exclude: ["MYSQL_PASSWORD", "TC_KEY"],
-				envPath: "../../.env",
 			}),
 			// Electron 插件仅在桌面端构建时启用
 			(!isCheck && !isCapacitor && !isWeb) && electron({
@@ -117,6 +133,8 @@ export default defineConfig(({ command, mode }) => {
 		},
 		server: {
 			port: 5173,
+			strictPort: true,
+			proxy,
 		},
 		optimizeDeps: {
 			// @capgo/capacitor-updater 顶层调用 Capacitor registerPlugin()，

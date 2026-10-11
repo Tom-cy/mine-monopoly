@@ -1,14 +1,15 @@
 <script setup lang="ts">
-import { apiLogin, apiRegister, getEncryptionKey } from "@src/utils/api/auth";
-import { ref, reactive, onBeforeMount } from "vue";
+import { apiLogin, apiRegister } from "@src/utils/api/auth";
+import { ref, reactive, onBeforeUnmount } from "vue";
 import { FPMessage } from "@mine-monopoly/ui";
-import { getEncryption } from "@src/utils/encryption";
 import { FontAwesomeIcon } from "@fortawesome/vue-fontawesome";
 import AvatarCropper from "./AvatarCropper.vue";
 
-onBeforeMount(() => {
-	getEncryptionKey();
-});
+function releaseCropperUrl() {
+	if (cropperSrc.value) URL.revokeObjectURL(cropperSrc.value);
+	cropperSrc.value = "";
+}
+onBeforeUnmount(releaseCropperUrl);
 
 const isLoading = ref(false);
 const avatarFile = ref<File | undefined>();
@@ -36,6 +37,11 @@ function handleFileChange(event: Event) {
 	const file = target.files?.[0];
 
 	if (file) {
+		if (!["image/png", "image/jpeg"].includes(file.type)) {
+			FPMessage({ type: "warning", message: "请选择 PNG 或 JPEG 头像" });
+			return;
+		}
+		releaseCropperUrl();
 		// Create object URL for cropper
 		cropperSrc.value = URL.createObjectURL(file);
 		showCropper.value = true;
@@ -43,6 +49,10 @@ function handleFileChange(event: Event) {
 }
 
 function handleCropConfirm(file: File) {
+	if (file.size > 2 * 1024 * 1024) {
+		FPMessage({ type: "warning", message: "头像不能超过 2 MiB" });
+		return;
+	}
 	avatarFile.value = file;
 	const reader = new FileReader();
 	reader.onload = (e) => {
@@ -50,11 +60,12 @@ function handleCropConfirm(file: File) {
 	};
 	reader.readAsDataURL(file);
 	showCropper.value = false;
+	releaseCropperUrl();
 }
 
 function handleCropCancel() {
 	showCropper.value = false;
-	cropperSrc.value = "";
+	releaseCropperUrl();
 	// Reset file input
 	const fileInput = document.getElementById("avatar") as HTMLInputElement;
 	if (fileInput) {
@@ -69,6 +80,8 @@ function resetRegisterForm() {
 	registerForm.confirmPassword = "";
 	registerForm.avatar = "";
 	registerForm.color = "#000000";
+	avatarFile.value = undefined;
+	releaseCropperUrl();
 }
 
 const handleRegister = async () => {
@@ -95,30 +108,30 @@ const handleRegister = async () => {
 		isLoading.value = false;
 		return;
 	}
-	if (registerForm.username.length > 8) {
-		FPMessage({ type: "warning", message: "用户名最多8个字符" });
+	if (registerForm.username.length > 20 || !registerForm.username.trim()) {
+		FPMessage({ type: "warning", message: "用户名需为1-20个字符" });
 		isLoading.value = false;
 		return;
 	}
-	if (registerForm.password.length < 6) {
-		FPMessage({ type: "warning", message: "密码长度不能少于6位" });
+	if (registerForm.password.length < 6 || new TextEncoder().encode(registerForm.password).length > 72 || registerForm.password.includes("\0")) {
+		FPMessage({ type: "warning", message: "密码至少6位，UTF-8长度不能超过72字节" });
 		isLoading.value = false;
 		return;
 	}
 	if (registerForm.password === registerForm.confirmPassword) {
 		const formData = new FormData();
-		const epassword = await getEncryption(registerForm.password);
-		if (epassword && avatarFile.value) {
+		if (avatarFile.value) {
 			formData.append("avatar", avatarFile.value);
 			formData.append("useraccount", registerForm.useraccount);
 			formData.append("username", registerForm.username);
-			formData.append("password", epassword as string);
+			formData.append("password", registerForm.password);
 			formData.append("color", registerForm.color);
 			try {
 				if (await apiRegister(formData)) {
 					loginForm.useraccount = registerForm.useraccount;
 					resetRegisterForm();
 					loginMode.value = true;
+					FPMessage({ type: "success", message: "注册成功，请登录并选择区服" });
 				}
 			} finally {
 				isLoading.value = false;
@@ -147,6 +160,7 @@ async function handleLogin() {
 	try {
 		const token = await apiLogin(loginForm.useraccount, loginForm.password);
 		if (token) {
+			loginForm.password = "";
 			emit("success", token);
 		}
 	} finally {
@@ -203,7 +217,7 @@ function handleColorClick() {
 			<div class="form-item">
 				<span class="lable">用户名</span>
 				<input autocomplete="off" class="fp-input" type="text" id="username" v-model="registerForm.username" maxlength="20" />
-				<span class="input-tip">最多8个字符</span>
+				<span class="input-tip">最多20个字符</span>
 			</div>
 		</div>
 		<div class="form-item">
@@ -214,7 +228,7 @@ function handleColorClick() {
 		<div class="form-item">
 			<span class="lable">密码</span>
 			<input autocomplete="off" class="fp-input" type="password" id="password" v-model="registerForm.password" />
-			<span class="input-tip">密码至少6位</span>
+			<span class="input-tip">密码至少6位，UTF-8长度不超过72字节</span>
 		</div>
 		<div class="form-item">
 			<span class="lable">确认密码</span>

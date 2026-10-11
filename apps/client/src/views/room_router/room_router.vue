@@ -7,7 +7,7 @@ import { FPMessage } from "@mine-monopoly/ui";
 import LoginExtra from "@src/views/login/components/login-extra.vue";
 import OnlineRoomPanel from "./components/online-room-panel.vue";
 import PartyModePanel from "./components/party-mode-panel.vue";
-import { ensureValidAuth } from "@src/utils/api";
+import { getCurrentRealmUser, getActiveRealm, logoutAccount } from "@src/utils/auth";
 import { throttle } from "@src/utils";
 import { useResourceStore } from "@src/store/game";
 import FpErrorBoundary from "@src/components/utils/fp-error-boundary/index.vue";
@@ -23,7 +23,7 @@ type RoomModePanelInstance = {
 };
 
 const user = computed(() => userInfoStore);
-const activeMode = ref<"online" | "party">("online");
+const activeMode = ref<"online" | "party">(getActiveRealm() ? "online" : "party");
 const isModeSwitching = ref(false);
 const roomRouterRef = ref<HTMLElement | null>(null);
 const onlineRoomPanelRef = ref<RoomModePanelInstance | null>(null);
@@ -131,8 +131,10 @@ onMounted(async () => {
 			(panel): panel is HTMLElement => panel !== null,
 		);
 		gsap.set(modePanels, { autoAlpha: 0, pointerEvents: "none" });
-		if (onlineRoomPanelRef.value?.panelElement) {
-			gsap.set(onlineRoomPanelRef.value.panelElement, { autoAlpha: 1, pointerEvents: "auto" });
+		const activePanel =
+			activeMode.value === "online" ? onlineRoomPanelRef.value?.panelElement : partyModePanelRef.value?.panelElement;
+		if (activePanel) {
+			gsap.set(activePanel, { autoAlpha: 1, pointerEvents: "auto" });
 		}
 
 		// 左右面板并行入场，右侧稍后 0.08 秒跟进，避免出现明显空档。
@@ -155,46 +157,26 @@ onMounted(async () => {
 	// 清除缓存
 	useResourceStore().clear();
 	roomListStore.$reset();
-	if (!userInfoStore.hasUserInfo()) {
-		useLoading().showLoading("读取用户信息中");
-		let token = localStorage.getItem("token") || "";
-		if (token) {
-			//账号登录 先尝试刷新 token，避免过期导致 401 重复提示
-			const userData = await ensureValidAuth();
-			if (userData) {
-				const { id: userId, useraccount, username, avatar, color } = userData;
-				const userInfoStore = useUserInfo();
-				userInfoStore.$patch({ userId, useraccount, username, avatar, color });
-				useLoading().hideLoading();
-				return;
-			} else {
-				useLoading().hideLoading();
-				handleLogout();
-				return;
-			}
-		}
-		let userInfo = localStorage.getItem("user") || "";
-		if (userInfo) {
-			//游客登录
-			try {
-				const { userId, useraccount = "", username, avatar = "", color } = JSON.parse(userInfo);
-				const userInfoStore = useUserInfo();
-				userInfoStore.$patch({ userId, useraccount, username, avatar, color });
-				useLoading().hideLoading();
-				return;
-			} catch (e: any) {
-				FPMessage({ type: "error", message: "读取用户信息失败, 请重新进行游客登记" });
-				handleLogout();
-			}
-		}
-		handleLogout();
+	const realmUser = getCurrentRealmUser();
+	if (realmUser) {
+		userInfoStore.$patch({
+			userId: realmUser.id,
+			username: realmUser.username,
+			avatar: realmUser.avatar,
+			color: realmUser.color,
+			useraccount: realmUser.useraccount,
+		});
+	} else if (!userInfoStore.hasUserInfo()) {
+		await router.replace({ name: "login" });
 	}
 });
 
-function handleLogout() {
-	localStorage.removeItem("token");
-	localStorage.removeItem("user");
-	router.replace({ name: "login" });
+async function handleLogout() {
+	if (userInfoStore.hasOnlineIdentity()) await logoutAccount();
+	else {
+		userInfoStore.$reset();
+		await router.replace({ name: "login" });
+	}
 }
 </script>
 

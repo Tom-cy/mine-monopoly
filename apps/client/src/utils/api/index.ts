@@ -1,281 +1,204 @@
-import axios, { AxiosError, AxiosResponse, InternalAxiosRequestConfig } from "axios";
-import { env } from "@mine-monopoly/env";
+import axios, { AxiosError, type AxiosResponse, type InternalAxiosRequestConfig } from "axios";
 import { FPMessage } from "@mine-monopoly/ui";
-import { clearAuthAndRedirect, getRefreshToken, setToken, setRefreshToken } from "@src/utils/auth";
-import type { ApiResponse } from "@mine-monopoly/types";
-import logService, { ErrorCategory, ErrorLevel } from "@src/utils/log";
+import { __MONOPOLYSERVER__ } from "@src/../global.config";
+import {
+	clearAccountSession, clearRealmSession, getAccountSession, getAccountToken, getActiveRealm,
+	getRealmToken, getRealmSession, getSessionGeneration, saveAccountSession, synchronizeSessionStorage,
+	tokenClaims,
+} from "../auth/session";
+import type { AccountAuth, AccountProfile, Result } from "./types";
+import { resolveAccountProfile } from "./resources";
 
-// 扩展 axios 配置：允许后台轮询/心跳类请求标记 silent，错误时跳过全局 toast
 declare module "axios" {
 	export interface AxiosRequestConfig {
-		/** 静默模式：请求失败时不通过全局拦截器弹 toast（用于心跳、状态轮询等后台请求） */
 		silent?: boolean;
+		identity?: "account" | "realm" | "none";
+		_authRetried?: boolean;
+		_authToken?: string | null;
+		_authSessionId?: string;
+		expectedRealmSessionId?: string;
 	}
 }
 
-// 获取 API 基础 URL
-const getApiBaseUrl = () => {
-	const protocol = env("PROTOCOL");
-	const domain = env("MONOPOLY_DOMAIN");
-	const prefix = env("API_BASE_PREFIX", "");
-	const port = env<number>("SERVER_PORT");
+export const AXIOS_HANDLED_ERROR = Symbol("__axios_handled_error__");
 
-	// 如果有前缀，使用路径模式（不需要端口）
-	if (prefix) {
-		return `${protocol}://${domain}${prefix}`;
+export class MonopolyApiError extends Error {
+	readonly [AXIOS_HANDLED_ERROR] = true;
+	constructor(public readonly code: number, message: string, public readonly response?: AxiosResponse, public readonly staleIdentity = false) {
+		super(message);
+		this.name = "MonopolyApiError";
 	}
-	// 否则使用端口模式
-	return `${protocol}://${domain}:${port}`;
-};
+}
 
-const apiClient = axios.create({
-	baseURL: getApiBaseUrl(),
-	timeout: 15000,
-});
+export function getApiErrorCode(error: unknown): number | undefined {
+	if (error instanceof MonopolyApiError) return error.code;
+	if (axios.isAxiosError(error)) return (error.response?.data as Result<unknown> | undefined)?.code;
+	return undefined;
+}
 
-// Symbol 标记：用于标记已在拦截器中处理过的错误
-// 避免 main.ts 的 unhandledrejection 重复显示错误消息
-const AXIOS_HANDLED_ERROR = Symbol("__axios_handled_error__");
-
-// 导出标记，供 main.ts 使用
-export { AXIOS_HANDLED_ERROR };
-
-// --- Token 刷新机制 ---
-
+const apiClient = axios.create({ baseURL: __MONOPOLYSERVER__, timeout: 15000 });
 let refreshPromise: Promise<boolean> | null = null;
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
-const REFRESH_BEFORE_EXPIRY_MS = 5 * 60 * 1000; // 过期前 5 分钟刷新
+const REFRESH_BEFORE_EXPIRY_MS = 60_000;
 
+/** Player credentials use TLS; loopback HTTP is reserved for the local Vite proxy. */
+export function assertCredentialTransport() {
+	if (typeof window === "undefined") return;
+	const origin = window.location.origin === "null" ? "http://localhost" : window.location.origin;
+	const target = new URL(__MONOPOLYSERVER__, origin);
+	const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(target.hostname);
+	if (target.protocol !== "https:" && !(target.protocol === "http:" && loopback)) {
+		throw new MonopolyApiError(46000, "请通过 HTTPS 访问游戏服务，本机开发可使用 localhost");
+	}
+}
+
+/** Only one rotation per tab. An old in-flight refresh cannot revive a signed-out session. */
 export function doRefresh(): Promise<boolean> {
 	if (refreshPromise) return refreshPromise;
+	const session = getAccountSession();
+	if (!session || session.refreshExpiresAt <= Date.now()) return Promise.resolve(false);
+	try { assertCredentialTransport(); } catch { return Promise.resolve(false); }
+	const rotate = async (synchronize: boolean) => {
+		if (synchronize) synchronizeSessionStorage();
+		const latest = getAccountSession();
+		if (!latest || tokenClaims(latest.token)?.sessionId !== tokenClaims(session.token)?.sessionId) return false;
+		if (latest.refreshToken !== session.refreshToken) {
+			startTokenRefreshTimer();
+			return true;
+		}
+		const expectedGeneration = getSessionGeneration();
+		const expectedRefreshToken = latest.refreshToken;
+		const response = await axios.post<Result<AccountAuth>>(
+			`${__MONOPOLYSERVER__.replace(/\/$/, "")}/auth/refresh`,
+			{ refreshToken: expectedRefreshToken }, { timeout: 15000 },
+		);
+		if (response.data?.code !== 200) return false;
+		if (getSessionGeneration() !== expectedGeneration || getAccountSession()?.refreshToken !== expectedRefreshToken) return false;
+		const credential = response.data.data;
+		saveAccountSession({ ...credential, account: resolveAccountProfile(credential.account) });
+		startTokenRefreshTimer();
+		return true;
+	};
+	// Web Locks also serialize one-use refresh credentials across tabs on supported browsers.
+	const pending: Promise<boolean> = (async () => {
+		if (typeof navigator !== "undefined" && navigator.locks) {
+			return await navigator.locks.request("monopoly-mine-account-refresh", () => rotate(true));
+		}
+		return await rotate(false);
+	})();
+	const result = pending.catch(() => false).finally(() => { refreshPromise = null; });
+	refreshPromise = result;
+	return result;
+}
 
-	const refreshToken = getRefreshToken();
-	if (!refreshToken) {
-		return Promise.resolve(false);
-	}
-
-	refreshPromise = axios
-		.post(`${getApiBaseUrl()}/user/refresh-token`, { refreshToken })
-		.then((res) => {
-			const data = res.data?.data;
-			if (data?.token && data?.refreshToken) {
-				setToken(data.token);
-				setRefreshToken(data.refreshToken);
-				return true;
-			}
-			return false;
-		})
-		.catch(() => false)
-		.finally(() => {
-			refreshPromise = null;
-		});
-
-	return refreshPromise;
+export function stopTokenRefreshTimer() {
+	if (refreshTimer !== null) clearTimeout(refreshTimer);
+	refreshTimer = null;
 }
 
 export function startTokenRefreshTimer() {
 	stopTokenRefreshTimer();
+	const session = getAccountSession();
+	if (!session) return;
 	refreshTimer = setTimeout(async () => {
-		const success = await doRefresh();
-		if (success) {
-			startTokenRefreshTimer();
-		} else {
-			clearAuthAndRedirect();
-		}
-	}, 30 * 60 * 1000 - REFRESH_BEFORE_EXPIRY_MS);
-}
-
-export function stopTokenRefreshTimer() {
-	if (refreshTimer) {
-		clearTimeout(refreshTimer);
 		refreshTimer = null;
-	}
-}
-
-/**
- * 确保用户凭证有效，先尝试刷新 token，成功后再获取用户信息。
- * 适用于登录页和房间列表页等需要验明身份的场景。
- *
- * @returns 用户信息对象，若凭证无效则返回 null（已自动跳转登录页）
- */
-export async function ensureValidAuth(): Promise<{
-	id: string;
-	useraccount: string;
-	username: string;
-	avatar: string;
-	color: string;
-} | null> {
-	const token = localStorage.getItem("token");
-	if (!token) return null;
-
-	const refreshed = await doRefresh();
-	if (!refreshed) {
-		FPMessage({ type: "error", message: "登录凭证已过期，请重新登录" });
-		clearAuthAndRedirect();
-		return null;
-	}
-
-	try {
-		const { getUserByToken } = await import("@src/utils/api/user");
-		return await getUserByToken(token);
-	} catch {
-		clearAuthAndRedirect();
-		return null;
-	}
-}
-
-// 页面从后台切回前台时检查 token 是否需要刷新
-document.addEventListener("visibilitychange", () => {
-	if (document.visibilityState === "visible") {
-		const token = localStorage.getItem("token");
-		if (!token) return;
-		try {
-			const payload = JSON.parse(atob(token.split(".")[1]));
-			const expiresAt = payload.exp;
-			if (expiresAt && Date.now() > expiresAt - REFRESH_BEFORE_EXPIRY_MS) {
-				doRefresh().then((ok) => {
-					if (ok) startTokenRefreshTimer();
-				});
-			}
-		} catch {
-			// token 解析失败，忽略
+		const generation = getSessionGeneration();
+		if (await doRefresh()) return;
+		if (getSessionGeneration() !== generation || !getAccountSession()) return;
+		if (getAccountSession()!.refreshExpiresAt <= Date.now()) {
+			clearAccountSession();
+			await navigateToLogin(false);
+		} else {
+			// A transient network failure should not erase an otherwise usable login.
+			refreshTimer = setTimeout(startTokenRefreshTimer, 60_000);
 		}
+	}, Math.max(1000, session.expiresAt - Date.now() - REFRESH_BEFORE_EXPIRY_MS));
+}
+
+async function navigateToLogin(realmOnly: boolean) {
+	const { resetOnlineIdentityAndRedirect } = await import("../auth");
+	await resetOnlineIdentityAndRedirect(realmOnly);
+}
+
+/** Validates the ACCOUNT without entering any server or silently revoking an existing REALM. */
+export async function ensureValidAuth(): Promise<AccountProfile | null> {
+	if (!getAccountToken()) return null;
+	try {
+		const { getAccountInfo } = await import("./user");
+		return await getAccountInfo();
+	} catch {
+		return null;
 	}
+}
+
+apiClient.interceptors.request.use(config => {
+	const kind = config.identity ?? "account";
+	if (kind === "realm" && config.expectedRealmSessionId && getActiveRealm()?.sessionId !== config.expectedRealmSessionId) {
+		throw new MonopolyApiError(46002, "区服会话已变更，本次请求已取消", undefined, true);
+	}
+	const token = kind === "none" ? null : kind === "realm" ? getRealmToken() : getAccountToken();
+	if (token || ["/auth/login", "/auth/register"].includes(config.url ?? "")) assertCredentialTransport();
+	config._authToken = token;
+	config._authSessionId = token ? tokenClaims(token)?.sessionId as string | undefined : undefined;
+	if (token) config.headers.set("Authorization", `Bearer ${token}`);
+	else config.headers.delete("Authorization");
+	if (kind !== "none" && !token) {
+		void navigateToLogin(kind === "realm");
+		throw new MonopolyApiError(kind === "realm" ? 46002 : 46001, kind === "realm" ? "请先选择区服" : "请先登录账号");
+	}
+	return config;
 });
 
-// --- 拦截器 ---
-
-// 请求拦截器
-apiClient.interceptors.request.use(
-	(config) => {
-		const token = localStorage.getItem("token");
-		if (token && config.headers) {
-			config.headers["Authorization"] = token;
+async function failedRequest(error: MonopolyApiError, config?: InternalAxiosRequestConfig): Promise<AxiosResponse> {
+	const kind = config?.identity ?? "account";
+	const accountExpired = error.code === 46001 || (error.code === 401 && kind === "account");
+	const realmExpired = error.code === 46002 || (error.code === 401 && kind === "realm");
+	if (config && kind === "account" && accountExpired && !config._authRetried) {
+		config._authRetried = true;
+		const sameSession = () => config._authSessionId === tokenClaims(getAccountToken() ?? "")?.sessionId;
+		// A sibling request may already have rotated the token that this request sent.
+		if (sameSession() && ((getAccountToken() && getAccountToken() !== config._authToken) || await doRefresh()) && sameSession()) {
+			return apiClient.request(config);
 		}
-		return config;
-	},
-	(error: AxiosError) => Promise.reject(error)
-);
-
-// 响应拦截器 - 成功
-apiClient.interceptors.response.use(
-	(response: AxiosResponse<ApiResponse>) => {
-		const { msg, status } = response.data;
-		if (msg && status === 200) {
-			FPMessage({ type: "success", message: msg });
-		}
-		return response.data as any;
-	},
-	// 响应拦截器 - 错误
-	async (error: AxiosError) => {
-		const originalConfig = error.config as InternalAxiosRequestConfig | undefined;
-		let message = "";
-		let showErrorMessage = true;
-		let errorLevel: ErrorLevel = ErrorLevel.ERROR;
-		let errorCategory: ErrorCategory = ErrorCategory.UNKNOWN;
-
-		// 1. 处理网络错误和超时
-		if (!error.response) {
-			errorCategory = ErrorCategory.NETWORK;
-			if (error.code === "ECONNABORTED") {
-				message = "请求超时，请检查网络连接";
-				errorLevel = ErrorLevel.WARNING;
-			} else {
-				message = "网络错误，请检查网络连接";
-				errorLevel = ErrorLevel.ERROR;
-			}
-		}
-		// 2. 处理 HTTP 错误
-		else {
-			const { status, data } = error.response;
-
-			switch (status) {
-				case 400:
-					message = (data as any)?.msg || "请求参数错误";
-					errorCategory = ErrorCategory.UNKNOWN;
-					errorLevel = ErrorLevel.WARNING;
-					break;
-				case 401: {
-					errorCategory = ErrorCategory.AUTH;
-					errorLevel = ErrorLevel.FATAL;
-					message = (data as any)?.msg || "登录凭证已过期，请重新登录";
-					// 刷新请求本身失败，直接跳登录
-					if (originalConfig?.url?.includes("/user/refresh-token")) {
-						clearAuthAndRedirect();
-						break;
-					}
-					// 尝试刷新 token
-					const refreshed = await doRefresh();
-					if (refreshed && originalConfig) {
-						// 用新 token 重试原请求
-						originalConfig.headers["Authorization"] = localStorage.getItem("token");
-						return apiClient.request(originalConfig);
-					}
-					// 刷新失败，跳登录（不在此提示，由调用层负责）
-					showErrorMessage = false;
-					clearAuthAndRedirect();
-					break;
-				}
-				case 403:
-					message = (data as any)?.msg || "没有权限访问";
-					errorCategory = ErrorCategory.AUTH;
-					errorLevel = ErrorLevel.FATAL;
-					break;
-				case 404:
-					message = (data as any)?.msg || "请求的资源不存在";
-					errorCategory = ErrorCategory.UNKNOWN;
-					errorLevel = ErrorLevel.WARNING;
-					break;
-				case 500:
-				case 502:
-				case 503:
-				case 504:
-					message = (data as any)?.msg || "服务器内部错误";
-					errorCategory = ErrorCategory.NETWORK;
-					errorLevel = ErrorLevel.ERROR;
-					break;
-				default:
-					message = (data as any)?.msg || `请求失败(${status})`;
-					errorCategory = ErrorCategory.NETWORK;
-					errorLevel = ErrorLevel.ERROR;
-			}
-		}
-
-		// 显示错误消息（必须在日志记录之前，防止日志异常导致消息丢失）
-		// silent 标记的请求（心跳/轮询）失败时不弹 toast，由调用方自行处理
-		if (showErrorMessage && message && !(originalConfig as InternalAxiosRequestConfig | undefined)?.silent) {
-			FPMessage({ type: "error", message });
-		}
-
-		// 标记错误已在拦截器中处理
-		// 避免 main.ts 的 unhandledrejection 重复显示
-		(error as any)[AXIOS_HANDLED_ERROR] = true;
-
-		// 记录错误日志（放在 try-catch 中，防止 FormData 等不可序列化数据导致日志写入异常中断错误处理流程）
-		try {
-			await logService.error({
-				category: errorCategory,
-				message,
-				stack: error.stack,
-				context: {
-					requestConfig: originalConfig ? {
-						url: originalConfig.url ?? "",
-						method: originalConfig.method ?? "",
-						data: originalConfig.data instanceof FormData ? "[FormData]" : originalConfig.data
-					} : undefined,
-					responseInfo: error.response ? {
-						status: error.response.status,
-						statusText: error.response.statusText,
-						data: error.response.data
-					} : undefined
-				}
-			});
-		} catch {
-			// 日志记录失败不应影响业务流程
-		}
-
-		return Promise.reject(error);
 	}
+	if (kind !== "none") {
+		if ((accountExpired || error.code === 46005) && config?._authToken === (kind === "realm" ? getRealmSession()?.token : getAccountToken())) {
+			stopTokenRefreshTimer();
+			clearAccountSession();
+			void navigateToLogin(false);
+		} else if (kind === "realm" && realmExpired && (!config?._authToken || config._authToken === getRealmSession()?.token)) {
+			clearRealmSession();
+			void navigateToLogin(true);
+		}
+	}
+	if (!config?.silent) FPMessage({ type: "error", message: error.message });
+	throw error;
+}
+
+apiClient.interceptors.response.use(
+	response => {
+		const result = response.data as Result<unknown>;
+		if (!result || typeof result.code !== "number") {
+			return failedRequest(new MonopolyApiError(0, "服务器返回了无效的数据", response), response.config);
+		}
+		if (result.code !== 200) return failedRequest(new MonopolyApiError(result.code, result.msg || "请求失败", response), response.config);
+		response.data = result.data;
+		return response;
+	},
+	(error: unknown) => {
+		if (axios.isCancel(error)) return Promise.reject(error);
+		if (error instanceof MonopolyApiError) return error.staleIdentity ? Promise.reject(error) : failedRequest(error);
+		const cause = error as AxiosError<Result<unknown>>;
+		const result = cause.response?.data;
+		const message = result?.msg || (cause.code === "ECONNABORTED" ? "请求超时，请稍后再试" : "无法连接游戏服务，请检查网络");
+		return failedRequest(new MonopolyApiError(result?.code ?? cause.response?.status ?? 0, message, cause.response), cause.config);
+	},
 );
+
+if (typeof document !== "undefined") {
+	document.addEventListener("visibilitychange", () => {
+		if (document.visibilityState === "visible" && getAccountSession()) startTokenRefreshTimer();
+	});
+}
 
 export default apiClient;

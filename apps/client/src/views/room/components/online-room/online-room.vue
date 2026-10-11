@@ -7,12 +7,12 @@ import { FPMessageBox, UserCancelledError } from "@src/components/utils/fp-messa
 import ItemSelector from "@src/components/utils/item-selector/item-selector.vue";
 import router from "@src/router";
 import { useLoading, useRoomInfo, useSettig, useUserInfo } from "@src/store";
-import { getGameMapById, getGameMapList } from "@src/utils/api/map";
+import { getGameMapById, getGameMapList, getFrozenRoomMap } from "@src/utils/api/map";
 import { MonopolyClient, useMonopolyClient } from "@src/core/monopoly-client/MonopolyClient";
 import { computed, h, onBeforeMount, onBeforeUnmount, onMounted, reactive, ref, toRaw, watch } from "vue";
 import { FontAwesomeIcon } from "@fortawesome/vue-fontawesome";
 import { copyToClipboard, getDisplayValueByFormSchema } from "@src/utils";
-import { setRoomPrivate } from "@src/utils/api/room-router";
+import { setRoomPrivate, getRegisteredRoom } from "@src/utils/api/room-router";
 import { FormSchema, GameMapInDb, GameSetting, RoleInRoom, UserInRoomInfo } from "@mine-monopoly/types";
 import { loadGameMapFromServer } from "@src/utils/file/game-map";
 import RolePreviewer from "../shared/role-previewer.vue";
@@ -52,7 +52,9 @@ const roomSlots = computed(() => {
 const ownerName = computed(() => roomInfoStore.ownerName);
 const ownerId = computed(() => roomInfoStore.ownerId);
 const roomId = computed(() => roomInfoStore.roomId);
-const isPrivate = ref(true);
+const roomCode = computed(() => roomInfoStore.roomCode || roomInfoStore.roomId);
+const isPrivate = ref(getRegisteredRoom(roomInfoStore.roomId)?.privateRoom ?? true);
+const privacySaving = ref(false);
 
 const isOwner = computed(() => userInfoStore.userId === roomInfoStore.ownerId);
 const amISpectator = computed(() => roomInfoStore.amISpectator);
@@ -165,15 +167,23 @@ const canAddAIPlayer = computed(
 );
 
 async function handleSetPrivate() {
-	isPrivate.value = !isPrivate.value;
-	await setRoomPrivate(roomId.value, isPrivate.value);
+	if (privacySaving.value) return;
+	privacySaving.value = true;
+	try {
+		const room = await setRoomPrivate(roomId.value, !isPrivate.value);
+		isPrivate.value = room.privateRoom;
+	} catch (error: any) {
+		FPMessage({ type: "error", message: error?.message || "修改房间可见性失败" });
+	} finally {
+		privacySaving.value = false;
+	}
 }
 
 async function handleCopyRoomId() {
-	await copyToClipboard(roomId.value);
+	await copyToClipboard(roomCode.value);
 	FPMessage({
 		type: "success",
-		message: "房间ID成功复制到剪贴板, 快去邀请小伙伴吧!",
+		message: "房间号已复制到剪贴板，快去邀请小伙伴吧!",
 	});
 }
 
@@ -286,9 +296,13 @@ async function handleDeleteSave(record: SaveRecord) {
 }
 
 async function handleSelectMap() {
+	if (getFrozenRoomMap(roomId.value)) {
+		FPMessage({ type: "info", message: "在线房间已固定地图版本，修改地图请退出后重新创建房间" });
+		return;
+	}
 	try {
 		useLoading().showLoading("地图列表加载中...");
-		const { gameMapList } = await getGameMapList(1, 1000);
+		const { gameMapList } = await getGameMapList(1, 100);
 		mapList.value = gameMapList;
 		mapSelectorVisible.value = true;
 	} catch {
@@ -300,6 +314,10 @@ async function handleSelectMap() {
 
 async function handleUploadMap() {
 	if (!socketClient) return;
+	if (getFrozenRoomMap(roomId.value)) {
+		FPMessage({ type: "info", message: "在线房间使用区服已发布地图，本地地图请在派对模式打开" });
+		return;
+	}
 
 	// Electron 通过主进程导入，文件会复制到固定 game-map/ 仓库并完成原始字节 hash 校验。
 	if (window.platformAPI?.importLocalMap && window.platformAPI.findLocalMapByHash) {
@@ -358,11 +376,16 @@ async function handleUploadMap() {
 					</div>
 
 					<div class="room-id">
-						<button v-if="isOwner" class="set-private-button btn-small" @click="handleSetPrivate">
+						<button
+							v-if="isOwner"
+							:disabled="privacySaving"
+							class="set-private-button btn-small"
+							@click="handleSetPrivate"
+						>
 							{{ isPrivate ? "点击公开" : "点击隐藏" }}
 						</button>
 						<div class="room-id-value" @click="handleCopyRoomId">
-							房间ID:<span>{{ roomId }}</span>
+							房间号:<span>{{ roomCode }}</span>
 						</div>
 					</div>
 

@@ -13,7 +13,7 @@ import {
 	UserInRoomInfo,
 } from "@mine-monopoly/types";
 import { isFullScreen, isLandscape, setTimeOutAsync } from "@src/utils";
-import { getUserByToken } from "@src/utils/api/user";
+import type { AccountProfile, ActiveRealm } from "@src/utils/api/types";
 import { getPlatformType } from "@src/utils/platform";
 import { normalizeAIDecisionConfig } from "@src/core/ai/ai-decision-config";
 import { useGameData } from "./game";
@@ -62,11 +62,45 @@ export const useUserInfo = defineStore("userInfo", {
 			username: "",
 			avatar: "",
 			color: "",
+			accountId: "",
+			serverId: "",
+			roleId: "",
+			identityType: "" as "" | "ACCOUNT" | "REALM" | "LOCAL",
+			realmExpiresAt: 0,
 		};
 	},
 	actions: {
 		hasUserInfo() {
 			return Boolean(this.userId);
+		},
+		hasOnlineIdentity() {
+			return this.identityType === "REALM" && Boolean(this.roleId) && this.realmExpiresAt > Date.now();
+		},
+		setAccountIdentity(account: AccountProfile) {
+			this.$reset();
+			this.accountId = account.id;
+			this.useraccount = account.useraccount;
+			this.username = account.username;
+			this.avatar = account.avatarUrl ?? "";
+			this.color = account.color ?? "#4F7CFF";
+			this.identityType = "ACCOUNT";
+		},
+		setRealmIdentity(realm: ActiveRealm, account: AccountProfile) {
+			this.setAccountIdentity(account);
+			this.userId = realm.roleId;
+			this.roleId = realm.roleId;
+			this.serverId = realm.serverId;
+			this.username = realm.nickname;
+			this.realmExpiresAt = realm.expiresAt;
+			this.identityType = "REALM";
+		},
+		setLocalIdentity(user: { userId: string; username: string; avatar?: string; color: string }) {
+			this.$reset();
+			this.userId = user.userId;
+			this.username = user.username;
+			this.avatar = user.avatar ?? "";
+			this.color = user.color;
+			this.identityType = "LOCAL";
 		},
 	},
 });
@@ -93,6 +127,9 @@ export const useRoomInfo = defineStore("roomInfo", {
 			mapId: "",
 			mapInfo: null as GameMapInDb | null,
 			roomId: "",
+			roomCode: "",
+			roomSessionId: "",
+			hostEpoch: 0,
 			isStarted: false,
 			ownerId: "",
 			ownerName: "",

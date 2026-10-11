@@ -1,5 +1,5 @@
 import { useLoading, useUtil } from "@src/store";
-import { __ICE_SERVER_PATH__, __ICE_USE_PREFIX__, __FATPAPER_HOST__ } from "@src/../global.config";
+import { __PEER_OPTIONS__ } from "@src/../global.config";
 import Peer, { DataConnection } from "peerjs";
 import { connectionDiagnostics } from "@src/utils/connection-diagnostics";
 
@@ -13,8 +13,13 @@ export class PeerClient {
 		this.rtcConfig = rtcConfig;
 	}
 
-	public async linkToHost(hostId: string) {
+	public getPeerId(): string {
+		return this.peer.id;
+	}
+
+	public async linkToHost(hostId: string, ticket: string) {
 		if (!hostId) throw new Error("无效的主机ID");
+		if (!ticket) throw new Error("缺少入房票据");
 		if (this.conn) {
 			this.conn.close();
 			this.conn = null;
@@ -34,11 +39,13 @@ export class PeerClient {
 					iceConnectionState: this.getIceConnectionState(),
 				});
 				connectionDiagnostics.checkRelayCandidates();
+				conn.close();
 				reject(reason + ", 连不上主机捏😣");
 			}, 10000);
 
 			const conn = this.peer.connect(hostId, {
 				reliable: true,
+				metadata: { ticket },
 			});
 
 			conn.on("open", () => {
@@ -73,47 +80,43 @@ export class PeerClient {
 		return { conn: this.conn, peer: this.peer };
 	}
 
-	public static async create(host: string, port: number, rtcConfig: RTCConfiguration) {
+	public static async create(host: string, port: number, rtcConfig: RTCConfiguration, peerId?: string) {
 		connectionDiagnostics.stageStart("SignalingConnect");
 		connectionDiagnostics.setIceServers(rtcConfig.iceServers || []);
-		connectionDiagnostics.setSignalingInfo(
-			__ICE_USE_PREFIX__ ? `${__FATPAPER_HOST__}${__ICE_SERVER_PATH__}` : `${host}:${port}`,
-			!!__ICE_USE_PREFIX__,
-		);
+		const peerOptions = { ...__PEER_OPTIONS__(), debug: 0, config: rtcConfig };
+		connectionDiagnostics.setSignalingInfo(`${peerOptions.host}:${peerOptions.port}${peerOptions.path}`, true);
 		connectionDiagnostics.captureNetworkInfo();
 		// 检测本地网络接口（不阻塞主流程）
 		connectionDiagnostics.detectLocalInterfaces();
 
 		// 向 PeerJS 信令服务器获取自己的 peerId
 		const peer = await new Promise<Peer>((resolve, reject) => {
-			const peerOptions = __ICE_USE_PREFIX__
-				? {
-						host: __FATPAPER_HOST__,
-						path: __ICE_SERVER_PATH__,
-						secure: true,
-						debug: 0,
-						config: rtcConfig,
-					}
-				: { host, port, debug: 0, config: rtcConfig };
+			connectionDiagnostics.logPeerEvent(
+				"Peer.constructor",
+				JSON.stringify({
+					host: peerOptions.host,
+					path: peerOptions.path,
+					port: peerOptions.port,
+					iceTransportPolicy: rtcConfig.iceTransportPolicy || "all",
+				}),
+			);
 
-			connectionDiagnostics.logPeerEvent("Peer.constructor", JSON.stringify({
-				mode: __ICE_USE_PREFIX__ ? "prefix" : "port",
-				host: __ICE_USE_PREFIX__ ? __FATPAPER_HOST__ : host,
-				path: __ICE_USE_PREFIX__ ? __ICE_SERVER_PATH__ : undefined,
-				port: __ICE_USE_PREFIX__ ? undefined : port,
-				iceTransportPolicy: rtcConfig.iceTransportPolicy || "all",
-			}));
-
-			const peer = new Peer(peerOptions);
+			const peer = peerId ? new Peer(peerId, peerOptions) : new Peer(peerOptions);
+			const signalingTimeout = setTimeout(() => {
+				peer.destroy();
+				reject(new Error("连接 Peer 信令服务超时，请稍后重试"));
+			}, 15000);
 
 			// 注册 PeerJS 生命周期事件
 			peer.on("open", (id) => {
+				clearTimeout(signalingTimeout);
 				connectionDiagnostics.logPeerEvent("Peer.open", `peerId=${id}`);
 				connectionDiagnostics.stageEnd("SignalingConnect", { peerId: id });
 				resolve(peer);
 			});
 
 			peer.on("error", (e) => {
+				clearTimeout(signalingTimeout);
 				connectionDiagnostics.logPeerEvent("Peer.error", `type=${e.type} message=${e.message}`);
 				connectionDiagnostics.stageFail("SignalingConnect", `Peer错误: ${e.type} - ${e.message}`);
 				reject(e);

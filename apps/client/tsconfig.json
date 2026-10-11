@@ -30,10 +30,10 @@
 				"../../packages/env/src/browser.ts"
 			],
 			"@mine-monopoly/ui": [
-				"../../packages/components/src/index.ts"
+				"../../packages/components/ui/index.ts"
 			],
 			"@mine-monopoly/utils": [
-				"../../packages/utils/src/index.ts"
+				"../../packages/utils/index.ts"
 			],
 			"@mine-monopoly/style": [
 				"../../packages/style/dist/types.d.ts"

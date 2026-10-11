@@ -1,45 +1,28 @@
-import { env } from "@mine-monopoly/env";
+/** 玩家 HTTP 接口与 PeerJS 信令分别配置，TURN 由房间准入接口提供。 */
+export const __MONOPOLYSERVER__ = (import.meta.env.VITE_API_BASE_URL || "/monopoly-api").replace(/\/+$/, "");
+export const __USERSERVERHOST__ = __MONOPOLYSERVER__;
+export const __MONOPOLYSERVERHOST__ = __MONOPOLYSERVER__;
+export const __MONOPOLY_ADMIN__ = import.meta.env.VITE_GAME_ADMIN_URL || "http://localhost:7111";
 
-// 基础环境变量
-export const __USERSERVERHOST__ = `http://localhost:${env<number>("SERVER_PORT", 81)}`;
+const browserOrigin = /^https?:$/.test(window.location.protocol) ? window.location.origin : "http://localhost";
 
-const prefix = env("API_BASE_PREFIX", "");
-const domain = env("MONOPOLY_DOMAIN");
-const protocol = env("PROTOCOL");
-const port = env<number>("SERVER_PORT", 81);
-const adminPort = env<number>("MONOPOLY_ADMIN_PORT", 83);
-const icePrefix = env("ICE_BASE_PREFIX", "") || prefix;
-const adminPrefix = env("ADMIN_BASE_PREFIX", "") || prefix;
+export function getPeerServerOptions() {
+	const peerUrl = new URL(import.meta.env.VITE_PEER_SERVER_URL || "/monopoly-mine-peer", browserOrigin);
+	return {
+		host: peerUrl.hostname,
+		port: Number(peerUrl.port || (peerUrl.protocol === "https:" ? 443 : 80)),
+		path: peerUrl.pathname.replace(/\/+$/, "") || "/monopoly-mine-peer",
+		secure: peerUrl.protocol === "https:",
+		key: import.meta.env.VITE_PEER_SERVER_KEY || "monopoly-mine",
+	};
+}
 
-// 根据前缀配置生成服务器地址
-export const __MONOPOLYSERVERHOST__ = prefix
-	? `${domain}${prefix}`
-	: `${domain}:${port}`;
-export const __APIPORT__ = env<number>("SERVER_PORT", 81);
-export const __ICE_SERVER_PORT__ = env<number>("ICE_SERVER_PORT", 3478);
-export const __MONOPOLYSERVER__ = prefix
-	? `${protocol}://${domain}${prefix}`
-	: `${protocol}://${domain}:${port}`;
-
-// ICE 服务配置
-// 有前缀时：使用域名 + 前缀作为 PeerJS path（配合 nginx 反代）
-// 无前缀时：使用端口模式，path 为默认的 /peerjs
-export const __ICE_SERVER_PATH__ = icePrefix || "/peerjs";
-export const __ICE_SERVER_HOST__ = icePrefix
-	? `${protocol}://${domain}`
-	: `${protocol}://${domain}`;
-export const __ICE_USE_PREFIX__ = !!icePrefix;
-
-// Admin 服务地址
-export const __MONOPOLY_ADMIN__ = adminPrefix
-	? `${protocol}://${domain}${adminPrefix}`
-	: `${protocol}://${domain}:${adminPort}`;
-
-export const __FATPAPER_HOST__ = env("MONOPOLY_DOMAIN");
-export const __PROTOCOL__ = env("PROTOCOL");
-
-// 腾讯云配置（可选）
-export const __TC_ID__ = env("TC_ID", "");
-export const __TC_KEY__ = env("TC_KEY", "");
-export const __TC_BUCKET_NAME__ = env("TC_BUCKET_NAME", "");
-export const __TC_REGION__ = env("TC_REGION", "");
+export const __PEER_OPTIONS__ = getPeerServerOptions;
+const peer = getPeerServerOptions();
+export const __ICE_SERVER_PATH__ = peer.path;
+export const __ICE_SERVER_HOST__ = peer.host;
+export const __ICE_SERVER_PORT__ = peer.port;
+export const __ICE_USE_PREFIX__ = true;
+export const __FATPAPER_HOST__ = peer.host;
+export const __PROTOCOL__ = __MONOPOLYSERVER__.startsWith("https:") || window.location.protocol === "https:" ? "https" : "http";
+export const __APIPORT__ = Number(new URL(__MONOPOLYSERVER__, browserOrigin).port || (__PROTOCOL__ === "https" ? 443 : 80));
