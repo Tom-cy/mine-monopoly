@@ -137,35 +137,55 @@ function parkFixture(mode = "volumetric") {
 		id: "park",
 		x: 5,
 		y: 5,
+		rotation: 0,
 		type: { id: "park-type", name: "城市中央公园", size: 1, modelId: "old-park" },
 	};
 	const fountain = {
 		id: "fountain",
 		x: 5,
 		y: 5,
-		type: { modelId: "new-fountain", sceneDecoration: true, sceneAssetId: "pearl-lotus-fountain" },
+		type: {
+			modelId: "new-fountain",
+			sceneDecoration: true,
+			sceneAssetId: "pearl-lotus-fountain",
+			sceneCollection: "china24-scene-models-v1",
+		},
 	};
 	const map = {
-		sceneVisual: { version: 1, mode, collection: "china24-3d-models-v1", hiddenOriginalTileIds: ["park"] },
+		sceneVisual: {
+			version: 1,
+			mode,
+			collection: "china24-3d-models-v1",
+			hiddenOriginalTileIds: ["park"],
+			hiddenOriginalModels: { park: { modelId: "old-park", sha256: "a".repeat(64) } },
+		},
 		mapItems: [park, fountain],
 		mapIndex: ["route"],
 		mapPaths: [],
 	};
-	const { root } = volumeFixture({ china24SceneModelId: "pearl-lotus-fountain" });
-	return { park, map, getModel: (id) => (id === "new-fountain" ? root : undefined) };
+	const { root } = volumeFixture({
+		china24SceneModelId: "pearl-lotus-fountain",
+		collection: "china24-scene-models-v1",
+	});
+	return {
+		park,
+		map,
+		getModel: (id) => (id === "new-fountain" ? root : undefined),
+		getHash: (id) => (id === "old-park" ? "a".repeat(64) : undefined),
+	};
 }
 
 test("visual replacement applies to either explicit mode only after a real fountain loads, without mutating source map", () => {
 	for (const mode of ["volumetric", "illustrated"]) {
-		const { park, map, getModel } = parkFixture(mode);
+		const { park, map, getModel, getHash } = parkFixture(mode);
 		const before = JSON.stringify(map);
-		assert.equal(shouldHideOriginalSceneTile(map, park, getModel), true);
+		assert.equal(shouldHideOriginalSceneTile(map, park, getModel, getHash), true);
 		assert.equal(
-			shouldHideOriginalSceneTile(map, park, () => undefined),
+			shouldHideOriginalSceneTile(map, park, () => undefined, getHash),
 			false,
 		);
 		assert.equal(
-			shouldHideOriginalSceneTile(map, park, () => new THREE.Group()),
+			shouldHideOriginalSceneTile(map, park, () => new THREE.Group(), getHash),
 			false,
 		);
 		assert.equal(JSON.stringify(map), before);
@@ -202,6 +222,15 @@ test("custom park business, movement, event and link targets always keep their o
 			park.x = 6;
 		},
 		({ park }) => {
+			park.rotation = 1;
+		},
+		({ park }) => {
+			park.rotation = 2;
+		},
+		({ park }) => {
+			park.rotation = 3;
+		},
+		({ park }) => {
 			park.type.name = "自定义公园";
 		},
 		({ map }) => {
@@ -229,8 +258,50 @@ test("custom park business, movement, event and link targets always keep their o
 	for (const change of variants) {
 		const fixture = parkFixture();
 		change(fixture);
-		assert.equal(shouldHideOriginalSceneTile(fixture.map, fixture.park, fixture.getModel), false);
+		assert.equal(shouldHideOriginalSceneTile(fixture.map, fixture.park, fixture.getModel, fixture.getHash), false);
 	}
+});
+
+test("replacing a hidden park model ID or bytes restores its mesh, and missing or invalid fingerprints fail safely", () => {
+	const { map, park, getModel, getHash } = parkFixture();
+	assert.equal(shouldHideOriginalSceneTile(map, park, getModel, getHash), true);
+	assert.equal(
+		shouldHideOriginalSceneTile(map, park, getModel, () => "b".repeat(64)),
+		false,
+	);
+	assert.equal(
+		shouldHideOriginalSceneTile(map, park, getModel, () => undefined),
+		false,
+	);
+	park.type.modelId = "custom-park";
+	assert.equal(
+		shouldHideOriginalSceneTile(map, park, getModel, () => "a".repeat(64)),
+		false,
+	);
+	park.type.modelId = "old-park";
+	for (const fingerprint of [
+		undefined,
+		null,
+		{},
+		{ modelId: "old-park", sha256: "bad" },
+		{ modelId: "custom-park", sha256: "a".repeat(64) },
+	]) {
+		map.sceneVisual.hiddenOriginalModels = fingerprint ? { park: fingerprint } : undefined;
+		assert.equal(shouldHideOriginalSceneTile(map, park, getModel, getHash), false);
+	}
+});
+
+test("only the expected fountain tile and GLB collections replace the original park", () => {
+	const { map, park, getModel, getHash } = parkFixture();
+	assert.equal(shouldHideOriginalSceneTile(map, park, getModel, getHash), true);
+	map.mapItems[1].type.sceneCollection = "custom-scene";
+	assert.equal(shouldHideOriginalSceneTile(map, park, getModel, getHash), false);
+	map.mapItems[1].type.sceneCollection = "china24-scene-models-v1";
+	const fountain = getModel("new-fountain");
+	fountain.traverse((object) => {
+		if (object.userData.china24SceneModelId === "pearl-lotus-fountain") object.userData.collection = "custom-scene";
+	});
+	assert.equal(shouldHideOriginalSceneTile(map, park, getModel, getHash), false);
 });
 
 test(

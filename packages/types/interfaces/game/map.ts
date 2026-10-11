@@ -216,6 +216,8 @@ export interface GameMap {
 		mode: "volumetric" | "illustrated";
 		collection: "china24-3d-models-v1";
 		hiddenOriginalTileIds: string[];
+		/** 仅替代 ID 与实际模型字节均匹配的默认网格；缺失时保留原网格。 */
+		hiddenOriginalModels?: Record<string, { modelId: string; sha256: string }>;
 	};
 
 	/** UI 模板列表 */

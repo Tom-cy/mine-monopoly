@@ -7,9 +7,9 @@ const clientRoot = path.resolve(__dirname, "../../../..");
 const ts = require(require.resolve("typescript", { paths: [clientRoot] }));
 const THREE = require(require.resolve("three", { paths: [clientRoot] }));
 
-function load(file, dependencies = {}, environment = {}) {
+function load(file, dependencies = {}, environment = {}, suffix = "") {
 	const module = { exports: {} };
-	const source = fs.readFileSync(path.resolve(clientRoot, file), "utf8").replaceAll("import.meta.env", "({})");
+	const source = fs.readFileSync(path.resolve(clientRoot, file), "utf8").replaceAll("import.meta.env", "({})") + suffix;
 	const { outputText } = ts.transpileModule(source, {
 		compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 	});
@@ -189,9 +189,10 @@ test("client map reset and both load paths clear a prior visual contract when sw
 		},
 	};
 	let selectedMap;
+	let modelFiles = [];
 	const decoded = () => ({
 		jsonData: JSON.stringify(selectedMap),
-		modelFiles: [],
+		modelFiles,
 		imageFiles: [{ id: "cover", name: "cover", filetype: "png", buffer: new Uint8Array([1]) }],
 	});
 	const loadMap = load(
@@ -242,14 +243,74 @@ test("client map reset and both load paths clear a prior visual contract when sw
 			buildingVisual: visual,
 			sceneVisual: { version: 1, mode: "volumetric", collection: "china24-3d-models-v1", hiddenOriginalTileIds: [] },
 		};
+		modelFiles = [{ id: "park-model", name: "park", filetype: "glb", buffer: new Uint8Array([1, 2, 3]) }];
 		await read();
+		const expectedSha256 = require("node:crypto").createHash("sha256").update(new Uint8Array([1, 2, 3])).digest("hex");
+		assert.equal(loadMap.getModelResourceSha256("park-model"), expectedSha256);
+		assert.equal(loadMap.getModelResourceSha256("cover"), undefined);
+		const modelResource = resourceStore.getRecourceById("park-model");
+		const originalUrl = modelResource.url;
+		modelResource.url = "blob:replaced-custom-model";
+		assert.equal(loadMap.getModelResourceSha256("park-model"), undefined);
+		modelResource.url = originalUrl;
 		assert.equal(mapStore.buildingVisual.unownedModelId, "L0");
 		assert.equal(mapStore.sceneVisual.mode, "volumetric");
 		delete selectedMap.buildingVisual;
 		delete selectedMap.sceneVisual;
+		modelFiles = [{ id: "park-model", name: "custom-park", filetype: "glb", buffer: new Uint8Array([3, 2, 1]) }];
 		await read();
+		assert.notEqual(loadMap.getModelResourceSha256("park-model"), expectedSha256);
 		assert.equal(mapStore.buildingVisual, undefined);
 		assert.equal(mapStore.sceneVisual, undefined);
 	}
 	resourceStore.clear();
+});
+
+test("model fingerprint preparation aborts safely and commits matching resources, hashes and map state together", async () => {
+	const resources = new Map([["old-model", { id: "old-model", type: "model", url: "blob:original" }]]);
+	let clearCount = 0;
+	let commitCount = 0;
+	let resolveHash;
+	const created = [];
+	const revoked = [];
+	const resourceStore = {
+		getRecourceById: (id) => resources.get(id),
+		clear() { clearCount++; resources.clear(); },
+		add(resource) { resources.set(resource.id, resource); },
+	};
+	const api = load("src/utils/file/game-map.ts", {
+		"@src/store/game": { useResourceStore: () => resourceStore },
+		"./map-loading": { assertMapLoadActive(signal) { if (signal?.aborted) throw new Error("aborted"); } },
+	}, {
+		Blob, Uint8Array,
+		crypto: { subtle: { digest: () => new Promise((resolve) => { resolveHash = resolve; }) } },
+		URL: {
+			createObjectURL(blob) { const url = URL.createObjectURL(blob); created.push(url); return url; },
+			revokeObjectURL(url) { revoked.push(url); URL.revokeObjectURL(url); },
+		},
+	}, "\nexport { loadMapDataToResourceStore as prepareResources };\n");
+	const decoded = { id: "map", jsonData: "{}", imageFiles: [], modelFiles: [{ id: "park", name: "park", filetype: "glb", buffer: new Uint8Array([1, 2, 3]) }] };
+	const controller = new AbortController();
+	const pending = api.prepareResources(decoded, { signal: controller.signal }, () => commitCount++);
+	assert.equal(clearCount, 0);
+	assert.equal(commitCount, 0);
+	controller.abort();
+	resolveHash(new Uint8Array(32).fill(1).buffer);
+	await assert.rejects(pending, /aborted/);
+	assert.equal(clearCount, 0);
+	assert.equal(commitCount, 0);
+	assert.equal(resources.get("old-model").url, "blob:original");
+	assert.deepEqual(revoked, created);
+	const success = api.prepareResources(decoded, {}, () => {
+		commitCount++;
+		assert.equal(resources.has("old-model"), false);
+		assert.equal(resources.get("park").type, "model");
+		assert.equal(api.getModelResourceSha256("park"), "01".repeat(32));
+	});
+	assert.equal(clearCount, 0);
+	resolveHash(new Uint8Array(32).fill(1).buffer);
+	await success;
+	assert.equal(clearCount, 1);
+	assert.equal(commitCount, 1);
+	for (const resource of resources.values()) URL.revokeObjectURL(resource.url);
 });

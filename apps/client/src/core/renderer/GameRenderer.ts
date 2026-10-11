@@ -40,7 +40,7 @@ import { ChanceCardTextureGenerator } from "../three/ChanceCardTextureGenerator"
 import { useGameData, useMapData, useResourceStore } from "@src/store/game";
 import { useAudioManager } from "@src/utils/audio/AudioManager";
 import { SoundName } from "@src/utils/audio/types";
-import { getModelById } from "@src/utils/file/game-map";
+import { getModelById, getModelResourceSha256 } from "@src/utils/file/game-map";
 import { PlayerModel, AnimationManager } from "@mine-monopoly/utils";
 import { DiceManager } from "./DiceManager";
 import { loadModel } from "@src/utils/three/model-loader";
@@ -586,7 +586,12 @@ export class GameRenderer {
 				property &&
 				usesLatestPropertySpriteGround(property, mapInfo, (id) => this.mapModules.get(id)?.scene);
 			const modelData = this.mapModules.get(mapItem.type.modelId);
-			const hideOriginal = shouldHideOriginalSceneTile(this.mapData, mapItem, (id) => this.mapModules.get(id)?.scene);
+			const hideOriginal = shouldHideOriginalSceneTile(
+				this.mapData,
+				mapItem,
+				(id) => this.mapModules.get(id)?.scene,
+				getModelResourceSha256,
+			);
 			if (!modelData && !isLatestPropertyGround && !hideOriginal) throw Error("加载MapItem时找不到模型");
 
 			// Handle animated models differently

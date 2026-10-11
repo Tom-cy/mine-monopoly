@@ -23,12 +23,23 @@ export function shouldHideOriginalSceneTile(
 	map: SceneMap,
 	tile: MapItem,
 	getModel: (id: string) => THREE.Object3D | undefined,
+	getModelSha256: (id: string) => string | undefined = () => undefined,
 ): boolean {
 	if (!hasSceneVisualContract(map) || !map.sceneVisual?.hiddenOriginalTileIds.includes(tile.id)) return false;
+	const fingerprint = map.sceneVisual.hiddenOriginalModels?.[tile.id];
+	if (
+		!fingerprint ||
+		fingerprint.modelId !== tile.type.modelId ||
+		typeof fingerprint.sha256 !== "string" ||
+		!/^[a-f0-9]{64}$/i.test(fingerprint.sha256) ||
+		getModelSha256(tile.type.modelId)?.toLowerCase() !== fingerprint.sha256.toLowerCase()
+	)
+		return false;
 	if (
 		tile.type.name !== "城市中央公园" ||
 		tile.x !== 5 ||
 		tile.y !== 5 ||
+		tile.rotation !== 0 ||
 		tile.type.size !== 1 ||
 		tile.property ||
 		tile.mapEventId ||
@@ -42,12 +53,25 @@ export function shouldHideOriginalSceneTile(
 	)
 		return false;
 	return map.mapItems.some((item) => {
-		const type = item.type as MapItem["type"] & { sceneDecoration?: unknown; sceneAssetId?: unknown };
-		if (type.sceneDecoration !== true || type.sceneAssetId !== "pearl-lotus-fountain") return false;
+		const type = item.type as MapItem["type"] & {
+			sceneDecoration?: unknown;
+			sceneAssetId?: unknown;
+			sceneCollection?: unknown;
+		};
+		if (
+			type.sceneDecoration !== true ||
+			type.sceneAssetId !== "pearl-lotus-fountain" ||
+			type.sceneCollection !== "china24-scene-models-v1"
+		)
+			return false;
 		const model = getModel(item.type.modelId);
 		let actualFountain = false;
 		model?.traverse((object) => {
-			if (object.userData.china24SceneModelId === "pearl-lotus-fountain") actualFountain = true;
+			if (
+				object.userData.china24SceneModelId === "pearl-lotus-fountain" &&
+				object.userData.collection === "china24-scene-models-v1"
+			)
+				actualFountain = true;
 		});
 		return actualFountain;
 	});

@@ -10,6 +10,14 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader";
 import { getDracoLoader } from "../draco/draco";
 import { assertMapLoadActive, MapLoadOptions, withMapDownloadSignal } from "./map-loading";
 
+// blob URL 的内容在创建后不可变；按当前 URL 查验，切换资源或地图不会复用旧指纹。
+const modelResourceHashes = new Map<string, string>();
+
+export function getModelResourceSha256(modelId: string): string | undefined {
+	const resource = useResourceStore().getRecourceById(modelId);
+	return resource?.type === "model" ? modelResourceHashes.get(resource.url) : undefined;
+}
+
 /**
  * 地图在写入客户端 store / Worker 前必须满足的 MapPath 运行时前置条件。
  */
@@ -285,8 +293,9 @@ export async function loadGameMapFromServer(mapId: string, options: MapLoadOptio
 		const gameMap = normalizeAndValidateGameMap(JSON.parse(mapData.jsonData) as GameMap);
 		validateMapBeforeCommit(gameMap, mapData.imageFiles);
 		assertMapLoadActive(options.signal);
-		loadMapDataToResourceStore(mapData);
-		useMapData().$patch({ ...gameMap, buildingVisual: gameMap.buildingVisual, sceneVisual: gameMap.sceneVisual });
+		await loadMapDataToResourceStore(mapData, options, () => {
+			useMapData().$patch({ ...gameMap, buildingVisual: gameMap.buildingVisual, sceneVisual: gameMap.sceneVisual });
+		});
 		useLoading().hideLoading();
 		const cover = useResourceStore().getRecourceById(gameMap.info.coverImageId);
 		return {
@@ -321,8 +330,9 @@ export async function loadGameMapFromFile(file: ArrayBuffer, options: MapLoadOpt
 	const gameMap = normalizeAndValidateGameMap(JSON.parse(mapData.jsonData) as GameMap);
 	validateMapBeforeCommit(gameMap, mapData.imageFiles, true);
 	assertMapLoadActive(options.signal);
-	loadMapDataToResourceStore(mapData);
-	useMapData().$patch({ ...gameMap, buildingVisual: gameMap.buildingVisual, sceneVisual: gameMap.sceneVisual });
+	await loadMapDataToResourceStore(mapData, options, () => {
+		useMapData().$patch({ ...gameMap, buildingVisual: gameMap.buildingVisual, sceneVisual: gameMap.sceneVisual });
+	});
 	const coverResource = useResourceStore().getRecourceById(gameMap.info.coverImageId);
 	if (!coverResource) throw Error("读取封面失败");
 	const mapInfo: GameMapInDb = {
@@ -350,14 +360,20 @@ export async function loadGameMapFromFile(file: ArrayBuffer, options: MapLoadOpt
 	return { gameMap, mapInfo };
 }
 
-function loadMapDataToResourceStore(mapData: {
-	id: string;
-	jsonData: string;
-	modelFiles: ProtoFileType[];
-	imageFiles: ProtoFileType[];
-}) {
+async function loadMapDataToResourceStore(
+	mapData: {
+		id: string;
+		jsonData: string;
+		modelFiles: ProtoFileType[];
+		imageFiles: ProtoFileType[];
+	},
+	options: MapLoadOptions,
+	commitMap: () => void,
+) {
 	const resourceStore = useResourceStore();
 	const prepared: ResourcesType[] = [];
+	const modelHashTasks: Array<Promise<readonly [string, string] | undefined>> = [];
+	let hashes: Array<readonly [string, string] | undefined> = [];
 	try {
 		for (const imageResource of mapData.imageFiles) {
 			const blob = new Blob([imageResource.buffer as BlobPart], { type: `image/${imageResource.filetype}` });
@@ -374,6 +390,19 @@ function loadMapDataToResourceStore(mapData: {
 		for (const modelResource of mapData.modelFiles) {
 			const blob = new Blob([modelResource.buffer as BlobPart], { type: `application/octet-stream` });
 			const modelUrl = URL.createObjectURL(blob);
+			modelHashTasks.push(
+				(async () => {
+					// 非安全环境无法取得 SubtleCrypto 时保留原网格，不放宽隐藏条件。
+					if (!globalThis.crypto?.subtle) return undefined;
+					try {
+						const digest = await crypto.subtle.digest("SHA-256", new Uint8Array(modelResource.buffer));
+						const sha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+						return [modelUrl, sha256] as const;
+					} catch {
+						return undefined;
+					}
+				})(),
+			);
 			//添加模型到资源仓库
 			prepared.push({
 				id: modelResource.id,
@@ -383,13 +412,19 @@ function loadMapDataToResourceStore(mapData: {
 				type: "model",
 			});
 		}
+		hashes = await Promise.all(modelHashTasks);
+		assertMapLoadActive(options.signal);
 	} catch (error) {
 		for (const resource of prepared) URL.revokeObjectURL(resource.url);
 		throw error;
 	}
 	// 全部资源准备成功后统一替换，失败的自定义地图不会清空上一张地图。
 	resourceStore.clear();
+	modelResourceHashes.clear();
+	for (const hash of hashes) if (hash) modelResourceHashes.set(hash[0], hash[1]);
 	for (const resource of prepared) resourceStore.add(resource);
+	// 与资源、指纹在同一同步段提交地图，避免摘要等待后出现新资源配旧地图。
+	commitMap();
 }
 
 export async function getModelById(modelId: string) {

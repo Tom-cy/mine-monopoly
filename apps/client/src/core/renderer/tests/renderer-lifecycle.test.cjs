@@ -82,6 +82,7 @@ function fixture(mobile = false, mapData = {}) {
 	const setting = { graphicQuality: "low", getPixelRatio: () => 1, initGraphicQuality() {} };
 	const mapStore = { mapItems: [], buildingModelIdList: [], getMapItemByPropertyId(id) { return this.mapItems.find((item) => item.property?.id === id); } };
 	const gameStore = { players: [], properties: [], currentMultiplier: 1 };
+	const modelHashes = new Map();
 	const gsap = {
 		killTweensOf() {},
 		to(target, options) {
@@ -97,6 +98,7 @@ function fixture(mobile = false, mapData = {}) {
 		"./WaterSurface": load(fs.readFileSync(path.resolve(clientRoot, "src/core/renderer/WaterSurface.ts"), "utf8"), { three: THREE }, {}),
 		"./PropertyBuildingVisual": load(fs.readFileSync(path.resolve(clientRoot, "src/core/renderer/PropertyBuildingVisual.ts"), "utf8"), { three: THREE }, {}),
 		"@src/utils/scene-decoration": load(fs.readFileSync(path.resolve(clientRoot, "src/utils/scene-decoration.ts"), "utf8"), {}, {}),
+		"@src/utils/file/game-map": { getModelResourceSha256: (id) => modelHashes.get(id) },
 		gsap: { __esModule: true, default: gsap },
 		"three/examples/jsm/controls/OrbitControls": { OrbitControls: Controls },
 		"three/examples/jsm/renderers/CSS2DRenderer": { CSS2DObject, CSS2DRenderer },
@@ -151,7 +153,7 @@ function fixture(mobile = false, mapData = {}) {
 	// 运行真实初始化/销毁控制流程；仅跳过 GPU 模型下载及具体画面内容。
 	for (const method of ["initDiceManager", "initMap", "initBackground", "initPlayer", "initChanceCard", "initMapPathChoiceArrowModel", "initLight", "initOutlinePass", "focusMe", "handlePropertyRaycaster", "handleMapEventRaycaster", "updateActiveSpeechBubbleLayout"])
 		renderer[method] = () => undefined;
-	return { renderer, GameRenderer, eventBus, listeners, timeouts, rafs, apps, graphics, container, gsap, mapStore, gameStore };
+	return { renderer, GameRenderer, eventBus, listeners, timeouts, rafs, apps, graphics, container, gsap, mapStore, gameStore, modelHashes };
 }
 
 test("destroy removes its window listeners and pending resize, unmounts its overlays, and is idempotent", async () => {
@@ -236,7 +238,7 @@ test("explicit scene modes use compatible camera limits and a neutral volume bac
 test("volume scene models sit in water with lit shadows and safely replace only an empty original park anchor", async () => {
 	const f = fixture();
 	const fountain = new THREE.Group();
-	fountain.userData = { china24Volumetric: true, china24SceneModelId: "pearl-lotus-fountain" };
+	fountain.userData = { china24Volumetric: true, china24SceneModelId: "pearl-lotus-fountain", collection: "china24-scene-models-v1" };
 	fountain.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardMaterial()));
 	const water = new THREE.Group();
 	water.userData.china24Volumetric = true;
@@ -250,14 +252,18 @@ test("volume scene models sit in water with lit shadows and safely replace only 
 	f.renderer.mapModules.set("water-model", { scene: water, hasAnimations: false });
 	f.renderer.mapModules.set("park-model", { scene: park, hasAnimations: false });
 	f.renderer.mapData = {
-		sceneVisual: { version: 1, mode: "volumetric", collection: "china24-3d-models-v1", hiddenOriginalTileIds: ["park"] },
+		sceneVisual: {
+			version: 1, mode: "volumetric", collection: "china24-3d-models-v1", hiddenOriginalTileIds: ["park"],
+			hiddenOriginalModels: { park: { modelId: "park-model", sha256: "a".repeat(64) } },
+		},
 		mapItems: [
 			{ id: "park", x: 5, y: 5, rotation: 0, type: { id: "park-type", name: "城市中央公园", size: 1, modelId: "park-model" } },
-			{ id: "fountain", x: 5, y: 5, rotation: 1, type: { modelId: "fountain-model", size: 3.4, sceneDecoration: true, sceneAssetId: "pearl-lotus-fountain" } },
+			{ id: "fountain", x: 5, y: 5, rotation: 1, type: { modelId: "fountain-model", size: 3.4, sceneDecoration: true, sceneAssetId: "pearl-lotus-fountain", sceneCollection: "china24-scene-models-v1" } },
 			{ id: "water", x: 5, y: 5, rotation: 0, type: { modelId: "water-model", size: 17.5, sceneDecoration: true, sceneBase: true } },
 		],
 		mapIndex: [], mapPaths: [],
 	};
+	f.modelHashes.set("park-model", "a".repeat(64));
 	const before = JSON.stringify(f.renderer.mapData);
 	await f.renderer.initMapItems();
 	const anchor = f.renderer.mapItemsInScene.get("park");
