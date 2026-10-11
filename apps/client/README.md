@@ -50,6 +50,31 @@ pnpm --filter @mine-monopoly/client check
 pnpm --filter @mine-monopoly/client build:web
 ```
 
+生产域名 `game.iskaola.com` 使用 `/play/` 入口，构建前显式设置前缀和同源服务路径（PowerShell）：
+
+```powershell
+$env:VITE_WEB_BASE_PATH = "/play/"
+$env:VITE_API_BASE_URL = "/monopoly-api"
+$env:VITE_PEER_SERVER_URL = "/monopoly-mine-peer"
+pnpm --filter @mine-monopoly/client build:web
+```
+
+将 `apps/client/dist/frontend/` 内全部文件上传到服务器 `/var/www/game/play/`，替换原 Unity 产物。Nginx 使用 `GameBackend/docker-prod/deploy/nginx/conf.d/game.conf`，页面路由回退到 `/play/index.html`，缺失静态资源返回 404。
+
+PeerServer 的生产启动参数必须包含 `--origin https://game.iskaola.com`（不带 `/play`）。当前服务监听 `127.0.0.1:9003`，Nginx 需运行于同一宿主机，或使用 Linux Docker host 网络；普通 bridge 容器内的 `127.0.0.1` 无法访问宿主机 PeerServer。容器部署还需挂载 `/var/www/game`。
+
+在服务器将配置安装到 Nginx 实际加载的 `conf.d/game.conf` 后，执行：
+
+```sh
+nginx -t && nginx -s reload
+curl -I https://game.iskaola.com/play
+curl -I https://game.iskaola.com/play/
+curl -I https://game.iskaola.com/play/login
+curl -i https://game.iskaola.com/monopoly-mine-peer/monopoly-mine/id
+```
+
+预期依次为跳转至 `/play/`、HTML 页面、前端路由 HTML、Peer ID。最后还需在浏览器确认信令 WebSocket 返回 101；HTTP 检查不能代替 WebSocket 和实际对局验证。Java 的 `application.yml` 与 `application-prod.yml` 保持现有配置。
+
 产物在 `apps/client/dist/frontend`。Electron 使用 `dev:electron` / `build:electron`；以上 Web 安装步骤跳过依赖安装脚本，需要 Electron 时再按桌面环境安装其运行时。Electron / Capacitor 原生发布应显式配置绝对 HTTPS API 和 Peer URL，浏览器开发代理不随打包产物一起发布。本次验证范围是 Web。
 
 ## 协议回归
