@@ -242,6 +242,9 @@ export class MonopolyClient {
 	public registerGameInitSession(initSessionId?: string): void {
 		this.currentInitSessionId = initSessionId || null;
 	}
+	public getGameInitSessionId(): string | null {
+		return this.currentInitSessionId;
+	}
 	private handleDisconnect(notification: { type: "info" | "success" | "warning" | "error"; content: string }): void {
 		useUtil().gamePaused = false;
 		useGameData().$reset();

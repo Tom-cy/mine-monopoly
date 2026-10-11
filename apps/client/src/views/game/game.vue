@@ -2,15 +2,9 @@
 	import {
 		onMounted,
 		computed,
-		onUnmounted,
 		ref,
-		onBeforeMount,
 		onBeforeUnmount,
 		h,
-		VNode,
-		isVNode,
-		render,
-		Fragment,
 	} from "vue";
 	import { GameRenderer } from "@src/core/renderer/GameRenderer";
 	import { useLoading, useRoomInfo, useUtil } from "@src/store";
@@ -23,18 +17,16 @@
 	import scoreboard from "./components/scoreboard.vue";
 	import PlayerContainer from "./components/player-container.vue";
 	import GameButtonsPanel from "./components/game-buttons-panel.vue";
-import LocalPartyTurnHandoff from "./components/local-party-turn-handoff.vue";
+	import LocalPartyTurnHandoff from "./components/local-party-turn-handoff.vue";
 	import { useGameData, useMapData } from "@src/store/game";
 	import { useLocalParty, getCurrentClientPlayerId } from "@src/store/local-party";
-	import { CustomUI, GameMap, UISchema, MapEventChangedData } from "@mine-monopoly/types";
-	import { compileTsToJs } from "@src/utils";
+	import { GameMap, MapEventChangedData } from "@mine-monopoly/types";
 	import { useAudioManager } from "@src/utils/audio/AudioManager";
 	import { SoundName } from "@src/utils/audio/types";
 	import useEventBus from "@src/utils/event-bus";
 	import { FPMessageBox } from "@src/components/utils/fp-message-box";
 	import { buildGameInitDiagnostics, wrapGameInitError } from "@src/utils/game-init-diagnostics";
 	import { ErrorCategory, logErrorWithOptions } from "@src/utils/log";
-	import { storeToRefs } from "pinia";
 	import UiRenderer from "@src/components/utils/ui-renderer/ui-renderer.vue";
 	import FpErrorBoundary from "@src/components/utils/fp-error-boundary/index.vue";
 	import FpDialog from "@src/components/utils/fp-dialog/fp-dialog.vue";
@@ -71,6 +63,78 @@ import LocalPartyTurnHandoff from "./components/local-party-turn-handoff.vue";
 
 	let socketClient: MonopolyClient;
 	let gameRenderer: GameRenderer | null;
+	let disposed = false;
+	let initializationVersion = 0;
+	let boundRoomId = "";
+	let boundRoomSessionId = "";
+	let boundLocalParty = false;
+	let rendererInitialization: Promise<void> | null = null;
+	let rendererEventsRegistered = false;
+	const eventBus = useEventBus();
+
+	// 页面离开、房间关闭或客户端被替换后，旧异步任务不能再操作会话和路由。
+	function isPageCurrent() {
+		return !disposed && Boolean(socketClient) && MonopolyClient.getInstance() === socketClient &&
+			router.currentRoute.value.name === "game" && roomInfoStore.roomId === boundRoomId &&
+			roomInfoStore.roomSessionId === boundRoomSessionId && localPartyStore.isActive === boundLocalParty;
+	}
+
+	function captureInitialization() {
+		const version = ++initializationVersion;
+		const initSessionId = socketClient.getGameInitSessionId();
+		return () => isPageCurrent() && version === initializationVersion &&
+			socketClient.getGameInitSessionId() === initSessionId;
+	}
+
+	function handleGameReinit() {
+		if (!isPageCurrent() || !rendererInitialization) return;
+		// 重连或重试可能在渲染器尚未完成时到达，只让最新初始化会话发送结果。
+		void finishGameInitialization(captureInitialization(), rendererInitialization);
+	}
+
+	function handlePlayerMoney(playerId: string, oldMoney: number, newMoney: number) {
+		if (!isPageCurrent()) return;
+		const audioManager = useAudioManager();
+		if (newMoney > oldMoney) audioManager.playSound(SoundName.GAIN_MONEY);
+		else if (newMoney < oldMoney) audioManager.playSound(SoundName.LOSE_MONEY);
+	}
+
+	function handleMapEventChanged(data: MapEventChangedData) {
+		if (!isPageCurrent() || !gameRenderer) return;
+		switch (data.action) {
+			case "link":
+				if (data.mapEvent && data.mapItemId) {
+					gameRenderer.addEventIcon(data.mapItemId, data.mapEvent);
+					gameRenderer.setMapItemEventUserData(data.mapItemId, data.mapEvent);
+				}
+				break;
+			case "add":
+				if (data.mapEvent) {
+					const linkedItem = mapDataStore.mapItems.find((m) => m.mapEventId === data.mapEvent!.id);
+					if (linkedItem) {
+						gameRenderer.addEventIcon(linkedItem.id, data.mapEvent);
+						gameRenderer.setMapItemEventUserData(linkedItem.id, data.mapEvent);
+					}
+				}
+				break;
+			case "remove":
+				if (data.mapEventId) {
+					for (const item of mapDataStore.mapItems) {
+						if (item.mapEventId === data.mapEventId) {
+							gameRenderer.removeEventIcon(item.id);
+							gameRenderer.setMapItemEventUserData(item.id, null);
+						}
+					}
+				}
+				break;
+			case "unlink":
+				if (data.mapItemId) {
+					gameRenderer.removeEventIcon(data.mapItemId);
+					gameRenderer.setMapItemEventUserData(data.mapItemId, null);
+				}
+				break;
+		}
+	}
 	const islockingCamera = ref(true);
 	const lockCameraIcon = computed(() => (islockingCamera.value ? "fa-video" : "fa-video-slash"));
 
@@ -114,14 +178,17 @@ import LocalPartyTurnHandoff from "./components/local-party-turn-handoff.vue";
 	}
 
 	onMounted(async () => {
-		try {
-			socketClient = useMonopolyClient();
-			useLoading().showLoading("加载数据中...");
-
-			// 暂停心跳检测，避免加载期间误判断连
-			socketClient.sendLoadingStarted();
-			socketClient.pauseHeartBeat();
-
+		socketClient = useMonopolyClient();
+		boundRoomId = roomInfoStore.roomId;
+		boundRoomSessionId = roomInfoStore.roomSessionId;
+		boundLocalParty = localPartyStore.isActive;
+		if (!isPageCurrent()) return;
+		useLoading().showLoading("加载数据中...");
+		socketClient.sendLoadingStarted();
+		socketClient.pauseHeartBeat();
+		eventBus.on("game:init", handleGameReinit);
+		const isCurrent = captureInitialization();
+		rendererInitialization = (async () => {
 			const canvas = document.getElementById("game-canvas") as HTMLCanvasElement;
 			const container = document.getElementsByClassName("game-page")[0] as HTMLDivElement;
 			if (!canvas || !container) {
@@ -130,72 +197,29 @@ import LocalPartyTurnHandoff from "./components/local-party-turn-handoff.vue";
 			const mapData = JSON.parse(JSON.stringify(mapDataStore.$state)) as GameMap;
 			gameRenderer = new GameRenderer(canvas, container, mapData);
 			await gameRenderer.init();
+		})();
+		await finishGameInitialization(isCurrent, rendererInitialization);
+	});
 
-				// 注册金钱粒子系统
-			// 恢复心跳检测
+	async function finishGameInitialization(isCurrent: () => boolean, initialization: Promise<void>) {
+		try {
+			await initialization;
+			if (!isCurrent()) return;
 			socketClient.resumeHeartBeat();
-
-			useEventBus().on("game:init", () => {
-				if (!amISpectator.value) void socketClient.gameInitFinished();
-			});
+			if (!rendererEventsRegistered) {
+				eventBus.on("player-money", handlePlayerMoney);
+				eventBus.on("map-event-changed", handleMapEventChanged);
+				rendererEventsRegistered = true;
+			}
 
 			if (amISpectator.value) {
 				useLoading().hideLoading();
 			} else {
 				useLoading().showLoading("数据加载完成，等待其他玩家加载...");
-				socketClient.gameInitFinished();
+				void socketClient.gameInitFinished();
 			}
-
-			// 监听玩家金钱变化事件
-			const audioManager = useAudioManager();
-			const eventBus = useEventBus();
-			eventBus.on("player-money", (playerId: string, oldMoney: number, newMoney: number) => {
-				if (newMoney > oldMoney) {
-					audioManager.playSound(SoundName.GAIN_MONEY);
-				} else if (newMoney < oldMoney) {
-					audioManager.playSound(SoundName.LOSE_MONEY);
-				}
-			});
-
-			// 监听动态地图事件变更
-			eventBus.on("map-event-changed", (data: MapEventChangedData) => {
-				if (!gameRenderer) return;
-				switch (data.action) {
-					case "link":
-						if (data.mapEvent && data.mapItemId) {
-							gameRenderer.addEventIcon(data.mapItemId, data.mapEvent);
-							gameRenderer.setMapItemEventUserData(data.mapItemId, data.mapEvent);
-						}
-						break;
-					case "add":
-						if (data.mapEvent) {
-							const linkedItem = mapDataStore.mapItems.find((m) => m.mapEventId === data.mapEvent!.id);
-							if (linkedItem) {
-								gameRenderer.addEventIcon(linkedItem.id, data.mapEvent);
-								gameRenderer.setMapItemEventUserData(linkedItem.id, data.mapEvent);
-							}
-						}
-						break;
-					case "remove":
-						if (data.mapEventId) {
-							// 移除所有关联此事件的地块上的图标
-							for (const item of mapDataStore.mapItems) {
-								if (item.mapEventId === data.mapEventId) {
-									gameRenderer.removeEventIcon(item.id);
-									gameRenderer.setMapItemEventUserData(item.id, null);
-								}
-							}
-						}
-						break;
-					case "unlink":
-						if (data.mapItemId) {
-							gameRenderer.removeEventIcon(data.mapItemId);
-							gameRenderer.setMapItemEventUserData(data.mapItemId, null);
-						}
-						break;
-				}
-			});
 		} catch (e: any) {
+			if (!isCurrent()) return;
 			// 异常时也要恢复心跳，防止永久暂停
 			socketClient?.resumeHeartBeat();
 			const diagnostics = buildGameInitDiagnostics(e, {
@@ -224,17 +248,24 @@ import LocalPartyTurnHandoff from "./components/local-party-turn-handoff.vue";
 				confirmText: "返回房间",
 				showCancel: false,
 			}).catch(() => {});
-			router.replace({ name: "room-router" });
+			// 主机可能已经通过 GameInitAborted 返回房间，关闭旧弹窗不能再次改路由。
+			if (isCurrent()) await router.replace({ name: "room" });
 		}
-	});
+	}
 
 	onBeforeUnmount(() => {
+		disposed = true;
+		initializationVersion++;
+		eventBus.remove("game:init", handleGameReinit);
+		eventBus.remove("player-money", handlePlayerMoney);
+		eventBus.remove("map-event-changed", handleMapEventChanged);
 		if (gameRenderer) gameRenderer.destroy();
 		gameRenderer = null;
 		// 只有在真正离开房间时才销毁 MonopolyClient（安全模式回房间时不销毁）
 		const nextRoute = router.currentRoute.value.name;
-		if (nextRoute !== "room") {
-			destoryMonopolyClient();
+		if (MonopolyClient.getInstance() === socketClient) {
+			if (nextRoute === "room") socketClient?.resumeHeartBeat();
+			else void destoryMonopolyClient();
 		}
 	});
 
