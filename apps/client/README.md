@@ -43,14 +43,20 @@ ACCOUNT 刷新凭据轮换在当前标签页合并请求，并在支持 Web Lock
 
 公共配置见 `.env.example`。这里只加载客户端目录的 Vite 环境文件。服务签名密钥、数据库密码、TURN 静态凭据不进入客户端配置。`VITE_MAP_ENCRYPT_KEY` 仅为现有 `.mmmap` 产品文件格式的可选解码参数；使用加密地图时需与发布端格式一致，浏览器可见，不能作为鉴权秘密。
 
-Web 部署使用 HTTPS，反向代理 `/monopoly-api` 到 Java、`/monopoly-mine-peer` 到 PeerServer 并支持 WebSocket；`VITE_API_BASE_URL` 与 `VITE_PEER_SERVER_URL` 默认使用同源路径。构建的默认访问前缀是 `/monopoly/`，由 `VITE_WEB_BASE_PATH` 配置，部署需为前端路由提供 index.html 回退。
+Web 部署使用 HTTPS，反向代理 `/monopoly-api` 到 Java、`/monopoly-mine-peer` 到 PeerServer 并支持 WebSocket；`VITE_API_BASE_URL` 与 `VITE_PEER_SERVER_URL` 使用同源路径。`.env.example` 是本机开发模板，复制为 `.env.local` 使用；线上 Web 配置单独维护在 `.env.web`，其中 `VITE_WEB_BASE_PATH=/play/` 与当前生产 NGINX 对齐，部署需为前端路由提供 index.html 回退。
+
+Vite 不会自动读取 `.env.example`。`dev` 使用 development 模式和本机 `.env.local`；`build:web` 使用 web 模式，加载 `.env` / `.env.local` 后再加载 `.env.web` / `.env.web.local`（如存在），模式专用文件中的同名配置覆盖本机值，终端环境变量优先级最高。`.env.web` 显式配置线上地址、访问前缀和地图格式参数，无需修改 `.env.local`。当前脚本不会加载 `.env.prod` 或 `.env.production`；`web` 模式名称仍对应 Vite 的生产构建。修改客户端配置后需重新打包，重载 NGINX 不会改变已经生成的前端配置。
+
+`VITE_BACKEND_URL`、`VITE_DEV_PROXY_CA_FILE` 和 `VITE_PEER_PROXY_TARGET` 只配置 Vite 本机开发代理；线上请求由 NGINX 转发，不需要把 Java `7011` 或 PeerServer `9003` 端口写入浏览器地址。`VITE_GAME_ADMIN_URL` 是本机管理后台链接，当前 `game.conf` 没有生产管理后台静态入口。
 
 ```powershell
 pnpm --filter @mine-monopoly/client check
 pnpm --filter @mine-monopoly/client build:web
 ```
 
-生产域名 `game.iskaola.com` 使用 `/play/` 入口，构建前显式设置前缀和同源服务路径（PowerShell）：
+Web 必须使用 `build:web`，它运行 `vite build --mode web`；`build` / `build:electron` 会执行 Electron 桌面打包。仓库根目录的 `build-client` 也调用桌面 `build`，不能用作 Web 发布命令。
+
+生产域名 `game.iskaola.com` 使用 `/play/` 入口。仓库内 `.env.web` 已配置对应前缀和同源服务路径，直接运行上面的 `build:web` 即可；也可在构建前用终端变量显式覆盖（PowerShell）：
 
 ```powershell
 $env:VITE_WEB_BASE_PATH = "/play/"
