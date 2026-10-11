@@ -7,10 +7,13 @@ import { FPMessage } from "@mine-monopoly/ui";
 import { __FATPAPER_HOST__, __ICE_SERVER_PORT__ } from "@src/../global.config";
 
 const panelElement = ref<HTMLElement | null>(null);
+const busy = ref(false);
 
 defineExpose({ panelElement });
 
 async function handleCreateLocalParty() {
+	if (busy.value) return;
+	busy.value = true;
 	try {
 		const monopolyClient =
 			useMonopolyClient() ??
@@ -24,6 +27,8 @@ async function handleCreateLocalParty() {
 		router.push({ name: "room" });
 	} catch (error: any) {
 		FPMessage({ type: "error", message: error?.message || "创建本地派对失败" });
+	} finally {
+		busy.value = false;
 	}
 }
 </script>
@@ -37,7 +42,7 @@ async function handleCreateLocalParty() {
 		</div>
 		<div class="enter-container">
 			<div class="party-party"></div>
-			<button type="button" class="local-party-button" @click="handleCreateLocalParty">开启本地派对</button>
+			<button type="button" class="local-party-button" :disabled="busy" @click="handleCreateLocalParty">{{ busy ? "正在创建…" : "开启本地派对" }}</button>
 		</div>
 	</section>
 </template>

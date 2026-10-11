@@ -7,6 +7,7 @@ import {
 	matchRoomApi,
 	leaveRoom,
 	getRegisteredRoom,
+	releaseCancelledAdmission,
 	type RoomAdmission,
 } from "@src/utils/api/room-router";
 import { ensureRealm, getActiveRealm, getCurrentRealmUser } from "@src/utils/auth";
@@ -20,7 +21,7 @@ import {
 	SocketMsgType,
 	ClientSocketMessage,
 } from "@mine-monopoly/types";
-import { handleServerSocketMessage } from "./host-message-handlers";
+import { cancelClientMapLoad, handleServerSocketMessage } from "./host-message-handlers";
 import router from "@src/router";
 import { connectionDiagnostics } from "@src/utils/connection-diagnostics";
 
@@ -35,6 +36,10 @@ export class MonopolyClient {
 	private static instance: MonopolyClient | null;
 	private session: WebRtcSessionManager;
 	private currentInitSessionId: string | null = null;
+	private destroyed = false;
+	private admissionRequest: Promise<RoomAdmission> | null = null;
+	private roomOperation = false;
+	private localPartyCreation: Promise<void> | null = null;
 
 	public static getInstance(): MonopolyClient;
 	public static getInstance(options: MonopolyClientOptions): Promise<MonopolyClient>;
@@ -61,6 +66,7 @@ export class MonopolyClient {
 		this.session = new WebRtcSessionManager({
 			iceServer: options.iceServer,
 			onMessage: (data) => {
+				if (this.destroyed) return;
 				// PauseGame/ResumeGame 由专用暂停弹窗展示，不走通用 toast，避免与 handleGamePause 重复弹出
 				if (
 					data.msg &&
@@ -109,14 +115,20 @@ export class MonopolyClient {
 		roomCode: string,
 		options: { mapId?: string; capacity?: number; privateRoom?: boolean } = {},
 	): Promise<boolean> {
+		if (this.roomOperation) return false;
+		this.roomOperation = true;
 		connectionDiagnostics.reset();
 		connectionDiagnostics.stageStart("joinRoom_Total");
 		try {
 			// 上一局若在暂停中异常结束，加入新房间时必须清理本地暂停 UI 状态。
 			useUtil().gamePaused = false;
 			await ensureRealm();
+			this.assertCurrent();
 			const peerId = await this.session.preparePeerId();
-			const data = await joinRoomApi({ roomCode, requestId: crypto.randomUUID(), peerId, ...options });
+			this.assertCurrent();
+			const data = await this.awaitAdmission(joinRoomApi(
+				{ roomCode, requestId: crypto.randomUUID(), peerId, ...options }, () => !this.destroyed,
+			));
 			await this.connectAdmission(data);
 			connectionDiagnostics.stageEnd("joinRoom_Total");
 			return true;
@@ -128,14 +140,22 @@ export class MonopolyClient {
 			connectionDiagnostics.stageFail("joinRoom_Total", message);
 			FPMessage({ type: "error", message });
 			return false;
+		} finally {
+			this.roomOperation = false;
 		}
 	}
 
 	public async matchRoom(): Promise<boolean> {
-		await ensureRealm();
-		const peerId = await this.session.preparePeerId();
+		if (this.roomOperation) return false;
+		this.roomOperation = true;
 		try {
-			const admission = await matchRoomApi({ requestId: crypto.randomUUID(), peerId });
+			await ensureRealm();
+			this.assertCurrent();
+			const peerId = await this.session.preparePeerId();
+			this.assertCurrent();
+			const admission = await this.awaitAdmission(matchRoomApi(
+				{ requestId: crypto.randomUUID(), peerId }, () => !this.destroyed,
+			));
 			if (!admission.matched) {
 				FPMessage({ type: "info", message: "当前区服暂无可加入的公开房间，可选择地图新建房间" });
 				return false;
@@ -146,10 +166,14 @@ export class MonopolyClient {
 			if (error?.staleIdentity) return false;
 			FPMessage({ type: "error", message: error?.message || "匹配房间失败" });
 			return false;
+		} finally {
+			this.roomOperation = false;
 		}
 	}
 
 	private async connectAdmission(data: RoomAdmission): Promise<void> {
+		if (this.destroyed) await releaseCancelledAdmission(data);
+		this.assertCurrent();
 		const room = data.room;
 		if (!room || !data.matched) throw new Error("服务器未返回房间准入信息");
 		if (!getRegisteredRoom(room.id)) {
@@ -203,8 +227,19 @@ export class MonopolyClient {
 	}
 
 	public async createLocalParty(defaultName: string): Promise<void> {
-		useUtil().gamePaused = false;
-		await this.session.createLocalParty(defaultName);
+		this.assertCurrent();
+		if (this.roomOperation) throw new Error("正在加入房间，请稍候；返回登录页可取消入房");
+		this.roomOperation = true;
+		try {
+			useUtil().gamePaused = false;
+			this.localPartyCreation = this.session.createLocalParty(
+				defaultName, () => !this.destroyed && MonopolyClient.instance === this,
+			);
+			await this.localPartyCreation;
+		} finally {
+			this.localPartyCreation = null;
+			this.roomOperation = false;
+		}
 	}
 	public addLocalPartyPlayer(): Promise<{ success: boolean; error?: string }> {
 		return this.session.addLocalPartyPlayer();
@@ -246,6 +281,7 @@ export class MonopolyClient {
 		return this.currentInitSessionId;
 	}
 	private handleDisconnect(notification: { type: "info" | "success" | "warning" | "error"; content: string }): void {
+		if (MonopolyClient.instance !== this) return;
 		useUtil().gamePaused = false;
 		useGameData().$reset();
 		useRoomInfo().$reset();
@@ -264,7 +300,14 @@ export class MonopolyClient {
 	public async leaveRoom() {
 		useUtil().gamePaused = false;
 		await this.sendMsg({ type: SocketMsgType.LeaveRoom, source: SocketMsgSource.Client, data: undefined });
-		this.session.pauseHeartbeat();
+		// 即使数据通道已断开，也必须通过 HTTP 释放席位并完成本地退出。
+		await this.destory();
+		if (MonopolyClient.instance !== this) return;
+		useGameData().$reset();
+		useRoomInfo().$reset();
+		useChat().$reset();
+		useGameLog().$reset();
+		await router.replace({ name: "room-router" });
 	}
 
 	public readyToggle() {
@@ -461,11 +504,7 @@ export class MonopolyClient {
 	}
 
 	public rollDice() {
-		// 客户端立即锁定，防止重复点击
-		const utilStore = useUtil();
-		utilStore.startAnimation();
-
-		this.sendMsg({
+		return this.sendTurnOperation({
 			type: SocketMsgType.Operation,
 			source: SocketMsgSource.Client,
 			data: { operateType: OperateType.RollDice, data: undefined },
@@ -473,11 +512,7 @@ export class MonopolyClient {
 	}
 
 	public useChanceCard(chanceCardId: string, targetIdList: string[]) {
-		// 客户端立即锁定，防止重复点击
-		const utilStore = useUtil();
-		utilStore.startAnimation();
-
-		this.sendMsg({
+		return this.sendTurnOperation({
 			type: SocketMsgType.Operation,
 			source: SocketMsgSource.Client,
 			data: {
@@ -485,6 +520,19 @@ export class MonopolyClient {
 				data: { chanceCardId, targetIdList },
 			},
 		});
+	}
+
+	private async sendTurnOperation(message: ClientSocketMessage): Promise<void> {
+		useUtil().startAnimation();
+		try {
+			if ((await this.sendMsg(message)).ok) return;
+		} catch (error) {
+			console.warn("[MonopolyClient] 回合操作发送失败", error);
+		}
+		if (MonopolyClient.instance === this && !this.destroyed) {
+			useUtil().cancelAnimation();
+			FPMessage({ type: "warning", message: "操作未发送，请等待连接恢复后重试" });
+		}
 	}
 
 	public sendDynamicButtonClick(buttonId: string) {
@@ -520,7 +568,39 @@ export class MonopolyClient {
 	}
 
 	public destory(keepalive = false): Promise<void> {
-		return this.session.close(keepalive);
+		this.destroyed = true;
+		cancelClientMapLoad(this);
+		const closing = this.session.close(keepalive);
+		// 待迟到的准入响应完成撤销后，大厅才允许启动下一次入房。
+		return Promise.all([
+			closing, this.admissionRequest?.catch(() => undefined), this.localPartyCreation?.catch(() => undefined),
+		]).then(() => undefined);
+	}
+
+	public hasRoomSession(): boolean {
+		return !this.destroyed && ["connected", "connecting", "reconnecting"].includes(this.session.getState());
+	}
+
+	private assertCurrent(): void {
+		if (this.destroyed || MonopolyClient.instance !== this) {
+			throw Object.assign(new Error("入房已取消"), { staleIdentity: true });
+		}
+	}
+
+	private async awaitAdmission(request: Promise<RoomAdmission>): Promise<RoomAdmission> {
+		const completion = request.then(async (admission) => {
+			if (this.destroyed) {
+				await releaseCancelledAdmission(admission);
+				this.assertCurrent();
+			}
+			return admission;
+		});
+		this.admissionRequest = completion;
+		try {
+			return await completion;
+		} finally {
+			if (this.admissionRequest === completion) this.admissionRequest = null;
+		}
 	}
 
 	public static destoryInstance(keepalive = false): Promise<void> {

@@ -32,6 +32,9 @@ const context = {
 	TextDecoder,
 	TextEncoder,
 	crypto: webcrypto,
+	AbortController,
+	setTimeout,
+	clearTimeout,
 	location: { origin: "https://client.example.test" },
 };
 function load(relative, dependencies, extras = {}) {
@@ -267,6 +270,24 @@ test("delayed admission from an old REALM cannot enter the new session and close
 	realm = { ...realm, sessionId: "realm-session-1" };
 	realmToken = "fixture-realm-token";
 });
+test("a cancelled page admission releases its captured seat without changing cached room state", async () => {
+	for (const needCreate of [true, false]) {
+		let finish;
+		deferredPost = new Promise((resolve) => { finish = resolve; });
+		let current = true;
+		const pending = rooms.joinRoomApi(
+			{ roomCode: "CANCEL", requestId: "request-cancelled-page", peerId: "player-peer-1" },
+			() => current,
+		);
+		current = false;
+		finish({ data: { matched: true, needCreate, room: { ...room, id: "105" }, hostLeaseToken: "cancelled-lease", iceServers: [] } });
+		await assert.rejects(pending, /入房已取消/);
+		assert.equal(exitCall.url, "/monopoly-api/rooms/105/" + (needCreate ? "close" : "leave"));
+		assert.equal(exitCall.options.headers.Authorization, "Bearer fixture-realm-token");
+		assert.equal(rooms.getRegisteredRoom("105"), undefined);
+		assert.equal(maps.getFrozenRoomMap("105"), null);
+	}
+});
 test("an unusable frozen map releases the admitted member instead of caching a partial room", async () => {
 	nextResult = {
 		matched: true,
@@ -312,6 +333,7 @@ const gameFile = load("src/utils/file/game-map.ts", {
 	"@src/utils": {},
 	"three/examples/jsm/loaders/GLTFLoader": {},
 	"../draco/draco": {},
+	"./map-loading": {},
 });
 test("frozen object SHA-256 rejects modified bytes", async () => {
 	const bytes = new TextEncoder().encode("immutable frozen map").buffer;
@@ -342,7 +364,7 @@ test("client destruction awaits session cleanup and preserves keepalive for befo
 			"@src/utils/auth": {},
 			"@src/core/network/WebRtcSessionManager": { WebRtcSessionManager: Session },
 			"@mine-monopoly/types": {},
-			"./host-message-handlers": {},
+			"./host-message-handlers": { cancelClientMapLoad() {} },
 			"@src/router": {},
 			"@src/utils/connection-diagnostics": {},
 		},

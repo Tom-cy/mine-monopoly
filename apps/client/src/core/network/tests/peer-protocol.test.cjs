@@ -166,6 +166,7 @@ function hostFixture(overrides = {}) {
 		}
 		async handleUserReconnect(id, conn) {
 			this.users.get(id).conn = conn;
+			return true;
 		}
 		sendToClient(conn, type, data, msg) {
 			conn.send(JSON.stringify({ type, data, msg, source: SocketMsgSource.Server }));
@@ -484,6 +485,9 @@ function sessionFixture(overrides = {}) {
 		getPeerId() {
 			return this.id;
 		}
+		isUsable() {
+			return !this.destroyed;
+		}
 		async linkToHost(host, ticket) {
 			calls.links.push({ host, ticket });
 			calls.order.push("link");
@@ -720,6 +724,7 @@ function roomFixture() {
 		useLoading: () => ({ hideLoading() {} }),
 	};
 	const noop = () => undefined;
+	const admissionWait = load("src/core/monopoly-host/admission-wait.ts", {}, clock);
 	const { Room } = load(
 		"src/core/monopoly-host/Room.ts",
 		{
@@ -728,6 +733,8 @@ function roomFixture() {
 			"@src/store": store,
 			"@src/utils": { randomString: () => "fixture" },
 			"@src/utils/api/map": { getFrozenRoomMap: () => ({ id: "44" }) },
+			"@src/utils/file/map-loading": { MAP_LOAD_TIMEOUT_MS: 420_000 },
+			"./admission-wait": admissionWait,
 			"@src/core/ai/remote-usage-stats": { clearAIRemoteUsageStats: noop },
 			"@src/core/worker/GameProcessWorker?worker": Worker,
 			"@src/store/game": { useMapData: () => ({ info: {} }) },

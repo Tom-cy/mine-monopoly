@@ -45,6 +45,8 @@ import { clearAIRemoteUsageStats, getAIRemoteUsageSnapshot } from "@src/core/ai/
 import { DataConnection } from "peerjs";
 import GameProcessWorker from "@src/core/worker/GameProcessWorker?worker";
 import { getGameMap } from "@src/utils/file/game-map";
+import { MAP_LOAD_TIMEOUT_MS } from "@src/utils/file/map-loading";
+import { AdmissionWait, createAdmissionWait } from "./admission-wait";
 import { useMapData } from "@src/store/game";
 import { FPMessage } from "@mine-monopoly/ui";
 import logService, { ErrorCategory, logWorkerError, logErrorWithOptions } from "@src/utils/log";
@@ -98,6 +100,7 @@ export class Room {
 	private readonly beforeStart?: () => Promise<void>;
 	private startPending = false;
 	private disposed = false;
+	private pendingAdmissions = new Map<string, AdmissionWait<unknown>>();
 	private userList: Map<string, UserInRoom>;
 	private aiUserList: Map<string, UserInRoomInfo>;
 	private ownerId: string = "";
@@ -855,45 +858,91 @@ export class Room {
 			});
 			this.roomInfoBroadcast();
 
-			// 本地派对所有真人共用一个已加载的 UI 地图；新加入玩家不需要再次传输或确认。
-			if (this.mapInfo && !this.localParty) {
-				// 如果是自定义地图，需要玩家确认风险
-				if (this.mapInfo.from === "custom") {
-					// 发送确认对话框
-					this.sendToClient(userInRoom.socketClient, SocketMsgType.ConfirmDialog, {
-						playerId: userInRoom.userId,
-						option: {
-							title: "房主要启用非官方地图",
-							content: `此地图由房主 <b>${
-								this.getOwner().username
-							} </b> 提供，未经过官方验证，可能存在<b><color:red>数据异常、游戏不平衡或脚本风险。</color></b><br>请谨慎游玩，并自行承担使用非官方内容所带来的风险。`,
-							confirmText: "同意",
-							cancelText: "不同意",
-						},
-					});
+			const isCurrent = () =>
+				!this.disposed &&
+				this.userList.get(user.userId) === userInRoom &&
+				userInRoom.socketClient === conn &&
+				conn.open;
+			try {
+				// 本地派对所有真人共用一个已加载的 UI 地图；新加入玩家不需要再次传输或确认。
+				if (this.mapInfo && !this.localParty) {
+					// 如果是自定义地图，需要玩家确认风险
+					if (this.mapInfo.from === "custom") {
+						const confirmation = this.waitForAdmission(
+							userInRoom.userId,
+							OperateType.ConfirmDialogResult,
+							120_000,
+							"地图使用确认超时，请重新入房",
+						);
+						// 发送确认对话框
+						this.sendToClient(userInRoom.socketClient, SocketMsgType.ConfirmDialog, {
+							playerId: userInRoom.userId,
+							option: {
+								title: "房主要启用非官方地图",
+								content: `此地图由房主 <b>${
+									this.getOwner().username
+								} </b> 提供，未经过官方验证，可能存在<b><color:red>数据异常、游戏不平衡或脚本风险。</color></b><br>请谨慎游玩，并自行承担使用非官方内容所带来的风险。`,
+								confirmText: "同意",
+								cancelText: "不同意",
+							},
+						});
 
-					// 等待玩家确认
-					const confirmResult = await this.operationListener.onceAsync(
-						userInRoom.userId,
-						OperateType.ConfirmDialogResult,
-					);
+						// 等待玩家确认
+						const confirmResult = await confirmation.promise;
+						if (!isCurrent()) return false;
 
-					// 如果玩家拒绝，踢出房间
-					if (!confirmResult.confirm) {
-						this.leave(userInRoom.userId);
-						return false;
+						// 如果玩家拒绝，踢出房间
+						if (!confirmResult.confirm) {
+							this.leave(userInRoom.userId);
+							return false;
+						}
 					}
+
+					// 先监听再发布，避免快速加载或同步本地连接的回包丢失。
+					const mapLoaded = this.waitForAdmission(
+						userInRoom.userId,
+						OperateType.MapResourceLoaded,
+						MAP_LOAD_TIMEOUT_MS,
+						"地图资源加载超时，请重新入房",
+					);
+					this.publishMapToClient(userInRoom.userId, this.mapInfo!);
+
+					// 等待地图资源加载完成
+					await mapLoaded.promise;
 				}
 
-				// 先发布自定义地图描述；旧客户端超时后回退到分块传输。
-				this.publishMapToClient(userInRoom.userId, this.mapInfo!);
-
-				// 等待地图资源加载完成
-				await this.operationListener.onceAsync(userInRoom.userId, OperateType.MapResourceLoaded);
+				return isCurrent();
+			} catch (error) {
+				if (isCurrent()) {
+					this.leave(user.userId, {
+						type: "error",
+						content: error instanceof Error ? error.message : "地图资源加载失败",
+					});
+				}
+				return false;
 			}
-
-			return true;
 		}
+	}
+
+	private waitForAdmission<T extends OperateType>(
+		userId: string,
+		eventType: T,
+		timeoutMs: number,
+		timeoutMessage: string,
+	): AdmissionWait<PlayerOperationResult[T]> {
+		this.pendingAdmissions.get(userId)?.cancel(new Error("房间接入已被新的连接替代"));
+		const wait = createAdmissionWait<PlayerOperationResult[T]>({
+			subscribe: (listener) => this.operationListener.on(userId, eventType, listener),
+			unsubscribe: (listener) => this.operationListener.remove(userId, eventType, listener),
+			timeoutMs,
+			timeoutMessage,
+		});
+		this.pendingAdmissions.set(userId, wait);
+		const clear = () => {
+			if (this.pendingAdmissions.get(userId) === wait) this.pendingAdmissions.delete(userId);
+		};
+		void wait.promise.then(clear, clear);
+		return wait;
 	}
 
 	/**
@@ -901,10 +950,14 @@ export class Room {
 	 * @param user 离开房间的用户的id
 	 * @returns 玩家离开后房间是否为空
 	 */
-	public leave(userId: string): boolean {
+	public leave(userId: string, notification?: SocketMessage["msg"]): boolean {
+		this.pendingAdmissions.get(userId)?.cancel(new Error("玩家已离开房间"));
+		this.pendingAdmissions.delete(userId);
+		this.clearMapTransferFallback(userId);
+		this.legacyCustomMapClients.delete(userId);
 		const user = this.userList.get(userId);
 		if (!user) return false;
-		this.sendToClient(user.socketClient, SocketMsgType.LeaveRoom, undefined);
+		this.sendToClient(user.socketClient, SocketMsgType.LeaveRoom, undefined, notification);
 		//房间中还有更多玩家的情况
 		if (this.isStarted) {
 			//游戏已经开始，处理断线
@@ -951,7 +1004,12 @@ export class Room {
 		this.roomInfoBroadcast();
 	}
 
-	public async handleUserReconnect(userId: string, newCoon: DataConnection, connectionVersion: number) {
+	public async handleUserReconnect(
+		userId: string,
+		newCoon: DataConnection,
+		connectionVersion: number,
+	): Promise<boolean> {
+		this.pendingAdmissions.get(userId)?.cancel(new Error("房间接入已被新的连接替代"));
 		const oldUser = this.userList.get(userId);
 		if (oldUser) oldUser.socketClient = newCoon;
 		if (oldUser && this.mapInfo) {
@@ -962,27 +1020,24 @@ export class Room {
 				newCoon.open;
 			this.roomInfoBroadcast();
 
-			// 重连后重新发布当前地图描述或服务器地图。
-			this.publishMapToClient(userId, this.mapInfo!);
-
-			// 等待地图资源加载完成
 			try {
-				await Promise.race([
-					this.operationListener.onceAsync(userId, OperateType.MapResourceLoaded),
-					new Promise((_, reject) =>
-						setTimeout(() => reject(new Error("地图资源加载超时")), this.TRANSFER_TIMEOUT),
-					),
-				]);
+				const mapLoaded = this.waitForAdmission(
+					userId,
+					OperateType.MapResourceLoaded,
+					MAP_LOAD_TIMEOUT_MS,
+					"地图资源加载超时，请重新入房",
+				);
+				this.publishMapToClient(userId, this.mapInfo!);
+				await mapLoaded.promise;
 			} catch (error) {
-				if (!isCurrent()) return;
-				this.sendToClient(newCoon, SocketMsgType.GameInitAborted, {
-					initSessionId: crypto.randomUUID(),
-					reason: error instanceof Error ? error.message : "地图资源加载失败",
+				if (!isCurrent()) return false;
+				this.leave(userId, {
+					type: "error",
+					content: error instanceof Error ? error.message : "地图资源加载失败",
 				});
-				this.handleUserOffline(userId);
-				return;
+				return false;
 			}
-			if (!isCurrent()) return;
+			if (!isCurrent()) return false;
 
 			if (this.gameProcessWorker) {
 				this.gameProcessWorker.postMessage(<WorkerCommMsg>{
@@ -999,8 +1054,9 @@ export class Room {
 				data: undefined,
 				msg: { type: "success", content: `${oldUser.username}重新连接` },
 			});
-		} else {
+			return true;
 		}
+		return false;
 	}
 
 	public async changeMap(data: RoomMapInfo) {
@@ -1645,6 +1701,10 @@ export class Room {
 		)
 			return false;
 		this.legacyCustomMapClients.delete(clientId);
+		if (extra?.initStatus === "failed") {
+			this.pendingAdmissions.get(clientId)?.cancel(new Error(extra.reason || "地图资源加载失败"));
+			return false;
+		}
 		this.emitOperation(clientId, OperateType.MapResourceLoaded, undefined, extra);
 		return true;
 	}
@@ -1726,6 +1786,11 @@ export class Room {
 
 	public destory() {
 		this.disposed = true;
+		for (const wait of this.pendingAdmissions.values()) wait.cancel(new Error("房间已关闭"));
+		this.pendingAdmissions.clear();
+		for (const clientId of this.mapTransferFallbackTimers.keys()) this.clearMapTransferFallback(clientId);
+		this.customMapLoadStates.clear();
+		this.legacyCustomMapClients.clear();
 		this.clearHeartbeatTimer();
 		this.clearInitTimeout();
 		if (this.gameProcessWorker) {

@@ -161,14 +161,55 @@ export class WebRtcSessionManager {
 	public isLocalParty(): boolean {
 		return this.localPartySession !== null;
 	}
-	public async createLocalParty(defaultName: string): Promise<void> {
+	public async createLocalParty(defaultName: string, isClientCurrent?: () => boolean): Promise<void> {
 		await this.close();
+		if (isClientCurrent && !isClientCurrent()) throw new Error("本地派对创建已取消");
 		this.explicitClose = false;
-		this.localPartySession = await LocalPartySession.create(defaultName, (message) => {
-			this.options.onMessage(message);
-			this.emit("message", message);
-		});
-		this.transition("connected", "本地派对");
+		const generation = ++this.lifecycleGeneration;
+		const isCurrent = () =>
+			!this.explicitClose &&
+			this.lifecycleGeneration === generation &&
+			(!isClientCurrent || isClientCurrent());
+		let installed = false;
+		let party: LocalPartySession | null = null;
+		const pendingMessages: ServerSocketMessage[] = [];
+		this.transition("connecting", "正在创建本地派对");
+		try {
+			party = await LocalPartySession.create(defaultName, (message) => {
+				if (!isCurrent()) return;
+				// Room.join 会同步发 JoinRoom；安装会话前不能让路由看到空会话。
+				if (!installed) pendingMessages.push(message);
+				else {
+					this.options.onMessage(message);
+					this.emit("message", message);
+				}
+			});
+			if (!isCurrent()) {
+				party.destroy();
+				party = null;
+				throw new Error("本地派对创建已取消");
+			}
+			this.localPartySession = party;
+			this.transition("connected", "本地派对");
+			installed = true;
+			for (const message of pendingMessages) {
+				if (!isCurrent() || this.localPartySession !== party) break;
+				this.options.onMessage(message);
+				this.emit("message", message);
+			}
+			if (!isCurrent()) throw new Error("本地派对创建已取消");
+		} catch (error) {
+			if (party && this.localPartySession === party) {
+				this.localPartySession = null;
+				party.destroy();
+			}
+			if (this.lifecycleGeneration === generation && !this.explicitClose) {
+				this.transition("failed", error instanceof Error ? error.message : "本地派对创建失败");
+			}
+			throw error;
+		} finally {
+			pendingMessages.length = 0;
+		}
 	}
 	public addLocalPartyPlayer() {
 		return this.localPartySession?.addHuman() ?? Promise.resolve({ success: false, error: "本地派对未创建" });
@@ -278,6 +319,7 @@ export class WebRtcSessionManager {
 		this.scheduleHeartbeatTimeout();
 	}
 	public handleHeartbeatReply(): void {
+		if (this.state !== "connected" || this.heartbeatPaused) return;
 		if (this.lastHeartbeatSentAt) {
 			const ping = Math.round((Date.now() - this.lastHeartbeatSentAt) / 2);
 			this.options.onHeartbeat?.(ping);
@@ -390,6 +432,9 @@ export class WebRtcSessionManager {
 		this.peerClient = null;
 		this.peerStrategy = null;
 		this.memberPeerId = null;
+		this.strategy = "prefer-p2p";
+		this.heartbeatPaused = false;
+		this.lastHeartbeatSentAt = 0;
 		const host = this.host;
 		const roomId = this.reconnectContext?.roomId;
 		this.localPartySession?.destroy();
@@ -476,7 +521,7 @@ export class WebRtcSessionManager {
 	}
 
 	private async ensurePeerClient(generation: number): Promise<void> {
-		if (this.peerClient && this.peerStrategy === this.strategy) return;
+		if (this.peerClient?.isUsable() && this.peerStrategy === this.strategy) return;
 		if (this.peerClient) {
 			this.peerClient.destory();
 			this.peerClient = null;
@@ -502,6 +547,11 @@ export class WebRtcSessionManager {
 			iceServers: this.iceServers,
 			...(this.strategy === "force-relay" ? { iceTransportPolicy: "relay" } : {}),
 		};
+	}
+	private hasRelayServer(): boolean {
+		return this.iceServers.some((server) =>
+			(Array.isArray(server.urls) ? server.urls : [server.urls]).some((url) => /^turns?:/i.test(url)),
+		);
 	}
 
 	private bindConnection(connection: DataConnection): void {
@@ -547,8 +597,6 @@ export class WebRtcSessionManager {
 	private handleConnectionLoss(connection: DataConnection, generation: number, detail: string): void {
 		if (!this.isCurrentConnection(connection, generation) || this.explicitClose) return;
 		this.rejectPendingJoin(new Error(detail));
-		this.connection = null;
-		this.stopHeartbeat();
 		this.startReconnection(detail);
 	}
 	private startMemberHeartbeat(roomId: string, generation: number): void {
@@ -591,8 +639,12 @@ export class WebRtcSessionManager {
 		this.heartbeatTimer = setInterval(() => {
 			if (this.heartbeatPaused || this.state !== "connected") return;
 			this.lastHeartbeatSentAt = Date.now();
-			if (this.send({ type: SocketMsgType.Heart, source: SocketMsgSource.Client, data: undefined }).ok)
-				this.scheduleHeartbeatTimeout();
+			if (!this.send({ type: SocketMsgType.Heart, source: SocketMsgSource.Client, data: undefined }).ok) {
+				this.startReconnection("心跳发送失败");
+				return;
+			}
+			// 只有收到回包才能延长截止时间，持续发送不能掩盖失去响应的连接。
+			if (!this.heartbeatTimeout) this.scheduleHeartbeatTimeout();
 		}, 3000);
 	}
 	private scheduleHeartbeatTimeout(): void {
@@ -614,6 +666,8 @@ export class WebRtcSessionManager {
 
 	private startReconnection(detail: string): void {
 		if (!this.reconnectContext || this.state === "reconnecting" || this.explicitClose) return;
+		this.stopHeartbeat();
+		this.disposeConnection();
 		this.transition("reconnecting", detail);
 		this.reconnectManager = new ReconnectionManager(async () => this.reconnectNow(), {
 			retryInterval: 3000,
@@ -625,7 +679,7 @@ export class WebRtcSessionManager {
 				actionLabel: "离开房间",
 			}),
 			onRetry: (attempt) => {
-				if (attempt >= 4) this.strategy = "force-relay";
+				if (attempt >= 4 && this.hasRelayServer()) this.strategy = "force-relay";
 				this.options.onReconnectAttempt?.(attempt, this.strategy);
 				this.emit("reconnect-attempt", { attempt, strategy: this.strategy });
 			},

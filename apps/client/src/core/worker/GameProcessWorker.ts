@@ -2085,21 +2085,25 @@ export class GameProcess implements IGameProcess {
 		//游戏循环
 		while (!this.isGameOver) {
 			await this.waitIfPaused();
+			if (this.isGameOver) return;
 			//回合循环 加载回合开始阶段
 			this.eventBus.emit("game.round.start");
 			const roundStartPhases = this.gameRoundPhase.roundStartPhase;
 			for (const phase of roundStartPhases) {
 				await this.runLongOperation(() => this.runGamePhase(phase), `执行回合开始阶段: ${phase.name}`);
+				if (this.isGameOver) return;
 			}
 
 			//玩家回合
 			for (const player of Array.from(this.players.values())) {
 				await this.waitIfPaused();
+				if (this.isGameOver) return;
 				// 检查玩家是否应该跳过回合
 				if (player.isStop > 0) {
 					const originalStop = player.isStop;
 					player.isStop--; // 减少停止计数
 					await player.commandBus.execute({ type: "player.round.skip", payload: { player } });
+					if (this.isGameOver) return;
 
 					// 根据剩余暂停次数显示不同的提示
 					if (player.isStop === 0) {
@@ -2117,6 +2121,7 @@ export class GameProcess implements IGameProcess {
 				}
 
 				await player.commandBus.execute({ type: "player.round.start", payload: { player } });
+				if (this.isGameOver) return;
 				this.currentRoundPlayer = player;
 				this.roundTurnNotify(player.id);
 				this.gameDataBroadcast();
@@ -2129,21 +2134,24 @@ export class GameProcess implements IGameProcess {
 						() => this.runGamePhase(phase, context),
 						`${player.name} 回合阶段: ${phase.name}`,
 					);
+					if (this.isGameOver) return;
 					if (player.isBankrupted) break;
 				}
 				this.currentRoundPlayer = null;
 				if (player.isBankrupted) {
 					await this.checkGameOver();
-					if (this.isGameOver) break;
+					if (this.isGameOver) return;
 					continue;
 				}
 				await player.commandBus.execute({ type: "player.round.end", payload: { player } });
+				if (this.isGameOver) return;
 			}
 
 			//回合结束阶段
 			const roundEndPhases = this.gameRoundPhase.roundEndPhase;
 			for (const phase of roundEndPhases) {
 				await this.runLongOperation(() => this.runGamePhase(phase), `执行回合结束阶段: ${phase.name}`);
+				if (this.isGameOver) return;
 			}
 			this.eventBus.emit("game.round.end");
 		}
@@ -3631,6 +3639,7 @@ export class GameProcess implements IGameProcess {
 	}
 
 	public async runGamePhase(phase: IGamePhase<GameContext>, context?: GameContext) {
+		if (this.isGameOver) return;
 		this.currentGamePhase = phase;
 		const checkGameOverEvent = {
 			fn: this.checkGameOver.bind(this),
@@ -4245,7 +4254,9 @@ export class GameProcess implements IGameProcess {
 	}
 
 	public async checkGameOver(): Promise<void> {
+		if (this.isGameOver) return;
 		const result = await this.gameOverRuleFunction({}, this);
+		if (this.isGameOver) return;
 		if (result === true) {
 			// 旧地图兼容: 返回 true/undefined 时按默认顺序（玩家ID列表）结束
 			this.gameOver(Array.from(this.players.keys()));
@@ -4255,7 +4266,9 @@ export class GameProcess implements IGameProcess {
 	}
 
 	private gameOver(rankedPlayerIds: string[]) {
+		if (this.isGameOver) return;
 		this.isGameOver = true;
+		this.gameRuntimeStack.clear();
 		this.rankedPlayerIds = rankedPlayerIds;
 		this.gameDataBroadcast();
 		this.gameBroadcast({

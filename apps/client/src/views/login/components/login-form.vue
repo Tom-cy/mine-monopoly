@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { apiLogin, apiRegister } from "@src/utils/api/auth";
+import type { AccountAuth } from "@src/utils/api/types";
 import { ref, reactive, onBeforeUnmount } from "vue";
 import { FPMessage } from "@mine-monopoly/ui";
 import { FontAwesomeIcon } from "@fortawesome/vue-fontawesome";
@@ -19,7 +20,7 @@ const avatarFile = ref<File | undefined>();
 const showCropper = ref(false);
 const cropperSrc = ref("");
 const colorInputRef = ref<HTMLInputElement | null>(null);
-const emit = defineEmits(["success", "error", "close"]);
+const emit = defineEmits<{ success: [auth: AccountAuth]; error: [error: unknown]; close: [] }>();
 
 const loginForm = reactive({
 	useraccount: "",
@@ -172,10 +173,10 @@ async function handleLogin() {
 	const controller = new AbortController();
 	activeRequest = controller;
 	try {
-		const token = await apiLogin(loginForm.useraccount, loginForm.password, controller.signal);
-		if (token) {
+		const auth = await apiLogin(loginForm.useraccount, loginForm.password, controller.signal);
+		if (auth && !controller.signal.aborted) {
 			loginForm.password = "";
-			emit("success", token);
+			emit("success", auth);
 		}
 	} finally {
 		if (activeRequest === controller) activeRequest = null;

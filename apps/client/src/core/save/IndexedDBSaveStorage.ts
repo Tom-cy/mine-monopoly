@@ -45,8 +45,10 @@ export class IndexedDBSaveStorage implements ISaveStorage {
 			const tx = db.transaction(STORE_NAME, "readwrite");
 			const store = tx.objectStore(STORE_NAME);
 			const request = store.put(record);
-			request.onsuccess = () => resolve();
 			request.onerror = () => reject(request.error);
+			// 请求成功之后事务仍可能因存储配额等原因回滚，提交完成才算保存成功。
+			tx.oncomplete = () => resolve();
+			tx.onerror = tx.onabort = () => reject(tx.error ?? request.error ?? new Error("本地存档保存失败"));
 		});
 	}
 
@@ -90,8 +92,9 @@ export class IndexedDBSaveStorage implements ISaveStorage {
 			const tx = db.transaction(STORE_NAME, "readwrite");
 			const store = tx.objectStore(STORE_NAME);
 			const request = store.delete(id);
-			request.onsuccess = () => resolve();
 			request.onerror = () => reject(request.error);
+			tx.oncomplete = () => resolve();
+			tx.onerror = tx.onabort = () => reject(tx.error ?? request.error ?? new Error("本地存档删除失败"));
 		});
 	}
 }

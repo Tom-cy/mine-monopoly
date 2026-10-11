@@ -5,7 +5,7 @@ import { computed } from "vue";
 interface ChanceCardDisplayInfo {
 	id: string;
 	name: string;
-	description: string;
+	description?: string;
 	iconId: string;
 	color: string;
 	type: string;
@@ -22,7 +22,7 @@ const props = defineProps<{
 
 // 转换 \n 为真实换行符
 const formattedDescription = computed(() => {
-	return props.chanceCard.description.replace(/\\n/g, "\n");
+	return String(props.chanceCard.description ?? "").replace(/\\n/g, "\n");
 });
 </script>
 

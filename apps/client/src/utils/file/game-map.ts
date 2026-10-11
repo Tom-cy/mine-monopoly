@@ -1,4 +1,4 @@
-import { GameMap, GameMapInDb, MapPath, Role } from "@mine-monopoly/types";
+import { GameMap, GameMapInDb, MapPath, ResourcesType, Role } from "@mine-monopoly/types";
 import { loadFromProto, ProtoFileType, decodeProductMap, gzipDecompress, normalizeGameMap } from "@mine-monopoly/utils";
 import { isProductFile, decrypt } from "@mine-monopoly/utils/crypto";
 import { env } from "@mine-monopoly/env";
@@ -8,6 +8,7 @@ import { useMapData, useResourceStore } from "@src/store/game";
 import { formatBytes } from "@src/utils";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader";
 import { getDracoLoader } from "../draco/draco";
+import { assertMapLoadActive, MapLoadOptions, withMapDownloadSignal } from "./map-loading";
 
 /**
  * 地图在写入客户端 store / Worker 前必须满足的 MapPath 运行时前置条件。
@@ -110,35 +111,57 @@ function normalizeLoadedGameMapData<T extends { jsonData: string }>(mapData: T):
 	return { ...mapData, jsonData: JSON.stringify(gameMap) };
 }
 
+function validateMapBeforeCommit(map: GameMap, imageFiles: ProtoFileType[], requireCover = false): void {
+	const editorVersion = map.info?.editorVersion;
+	if (!editorVersion) throw new Error("地图数据缺少版本信息");
+	const version = editorVersion.split(".").slice(0, 2).join(".");
+	if (version !== __COMPATIBLE_VERSION__) {
+		throw new Error(`版本不匹配！地图编辑器版本: ${version}, 客户端版本: ${__COMPATIBLE_VERSION__}`);
+	}
+	const imageIds = new Set(imageFiles.map((resource) => resource.id));
+	for (const role of map.roles) {
+		if (!imageIds.has(role.imageId)) throw new Error(`角色“${role.name || role.id}”缺少图片资源`);
+	}
+	if (requireCover && !imageIds.has(map.info.coverImageId)) throw new Error("读取封面失败");
+}
+
 /**
  * 流式下载地图文件并显示进度（已下载/总大小）
  * 通过 Content-Length 获取总大小；服务器未返回时仅显示已下载大小
  */
-async function downloadMapFile(url: string): Promise<ArrayBuffer> {
-	const response = await fetch(resolveMapResourceUrl(url));
-	if (!response.ok) {
-		throw new Error(`地图文件下载失败 (HTTP ${response.status})`);
-	}
-	const total = Number(response.headers.get("content-length") || 0);
-	if (!response.body) return response.arrayBuffer();
-	const reader = response.body.getReader();
-	const chunks: BlobPart[] = [];
-	let received = 0;
-	while (true) {
-		const { done, value } = await reader.read();
-		if (done) break;
-		if (value) {
-			// 转为独立 ArrayBuffer 视图，满足 BlobPart 的 Uint8Array<ArrayBuffer> 类型要求
-			chunks.push(new Uint8Array(value));
-			received += value.byteLength;
-			const text =
-				total > 0
-					? `正在读取地图... ${formatBytes(received)} / ${formatBytes(total)} (${((received / total) * 100).toFixed(0)}%)`
-					: `正在读取地图... ${formatBytes(received)}`;
-			useLoading().showLoading(text, total > 0 ? (received / total) * 100 : 0);
+async function downloadMapFile(url: string, options: MapLoadOptions): Promise<ArrayBuffer> {
+	return withMapDownloadSignal(options.signal, async (signal) => {
+		const response = await fetch(resolveMapResourceUrl(url), { signal });
+		if (!response.ok) {
+			throw new Error(`地图文件下载失败 (HTTP ${response.status})`);
 		}
-	}
-	return new Blob(chunks).arrayBuffer();
+		const total = Number(response.headers.get("content-length") || 0);
+		if (!response.body) return response.arrayBuffer();
+		const reader = response.body.getReader();
+		const chunks: BlobPart[] = [];
+		let received = 0;
+		try {
+			while (true) {
+				assertMapLoadActive(signal);
+				const { done, value } = await reader.read();
+				if (done) break;
+				if (value) {
+					// 转为独立 ArrayBuffer 视图，满足 BlobPart 的 Uint8Array<ArrayBuffer> 类型要求
+					chunks.push(new Uint8Array(value));
+					received += value.byteLength;
+					const text =
+						total > 0
+							? `正在读取地图... ${formatBytes(received)} / ${formatBytes(total)} (${((received / total) * 100).toFixed(0)}%)`
+							: `正在读取地图... ${formatBytes(received)}`;
+					useLoading().showLoading(text, total > 0 ? (received / total) * 100 : 0);
+				}
+			}
+		} finally {
+			reader.releaseLock();
+		}
+		assertMapLoadActive(signal);
+		return new Blob(chunks).arrayBuffer();
+	});
 }
 
 async function loadFromProductFile(
@@ -210,7 +233,8 @@ function mapFormatKey(): string {
 	return import.meta.env.VITE_MAP_FORMAT_KEY || env("MAP_ENCRYPT_KEY", "");
 }
 
-export async function getGameMap(gameMapInfo: GameMapInDb) {
+export async function getGameMap(gameMapInfo: GameMapInDb, options: MapLoadOptions = {}) {
+	assertMapLoadActive(options.signal);
 	const encryptKey = mapFormatKey();
 	const platform = window.platformAPI;
 
@@ -224,10 +248,10 @@ export async function getGameMap(gameMapInfo: GameMapInDb) {
 				await verifyMapFileHash(cached, gameMapInfo.hash);
 				arrayBuffer = cached;
 			} catch {
-				arrayBuffer = await downloadMapFile(gameMapInfo.mapUrl);
+				arrayBuffer = await downloadMapFile(gameMapInfo.mapUrl, options);
 			}
 		} else {
-			arrayBuffer = await downloadMapFile(gameMapInfo.mapUrl);
+			arrayBuffer = await downloadMapFile(gameMapInfo.mapUrl, options);
 			await verifyMapFileHash(arrayBuffer, gameMapInfo.hash);
 			// 读取用户设置的最大缓存（幂等：从 localStorage 同步最新值）
 			useSettig().initMapCacheMaxSize();
@@ -235,17 +259,20 @@ export async function getGameMap(gameMapInfo: GameMapInDb) {
 			await platform.saveMapCache(gameMapInfo.id, gameMapInfo.hash, arrayBuffer, maxSizeBytes);
 		}
 	} else {
-		arrayBuffer = await downloadMapFile(gameMapInfo.mapUrl);
+		arrayBuffer = await downloadMapFile(gameMapInfo.mapUrl, options);
 	}
+	assertMapLoadActive(options.signal);
 	await verifyMapFileHash(arrayBuffer, gameMapInfo.hash);
 
 	const bytes = new Uint8Array(arrayBuffer);
 	// Detect format: .mmmap (encrypted product file) or .fpmap (legacy)
 	const mapData = isProductFile(bytes) ? await loadFromProductFile(bytes, encryptKey) : await loadFromProto(bytes);
+	assertMapLoadActive(options.signal);
 	return normalizeLoadedGameMapData(mapData);
 }
 
-export async function loadGameMapFromServer(mapId: string) {
+export async function loadGameMapFromServer(mapId: string, options: MapLoadOptions = {}) {
+	assertMapLoadActive(options.signal);
 	useLoading().showLoading("正在向服务器获取地图信息...");
 	const room = useRoomInfo();
 	const frozenMap = getFrozenRoomMap(room.roomId);
@@ -254,10 +281,12 @@ export async function loadGameMapFromServer(mapId: string) {
 	const mapInfo = frozenMap || (await getGameMapById(mapId));
 	if (mapInfo) {
 		useLoading().showLoading("正在读取地图...");
-		const mapData = await getGameMap(mapInfo);
+		const mapData = await getGameMap(mapInfo, options);
 		const gameMap = normalizeAndValidateGameMap(JSON.parse(mapData.jsonData) as GameMap);
+		validateMapBeforeCommit(gameMap, mapData.imageFiles);
+		assertMapLoadActive(options.signal);
+		loadMapDataToResourceStore(mapData);
 		useMapData().$patch(gameMap);
-		await loadMapDataToResourceStore(mapData);
 		useLoading().hideLoading();
 		const cover = useResourceStore().getRecourceById(gameMap.info.coverImageId);
 		return {
@@ -275,7 +304,8 @@ export async function loadGameMapFromServer(mapId: string) {
 	}
 }
 
-export async function loadGameMapFromFile(file: ArrayBuffer) {
+export async function loadGameMapFromFile(file: ArrayBuffer, options: MapLoadOptions = {}) {
+	assertMapLoadActive(options.signal);
 	useLoading().showLoading("正在读取地图...");
 	const bytes = new Uint8Array(file);
 	const encryptKey = mapFormatKey();
@@ -289,8 +319,10 @@ export async function loadGameMapFromFile(file: ArrayBuffer) {
 	}
 
 	const gameMap = normalizeAndValidateGameMap(JSON.parse(mapData.jsonData) as GameMap);
+	validateMapBeforeCommit(gameMap, mapData.imageFiles, true);
+	assertMapLoadActive(options.signal);
+	loadMapDataToResourceStore(mapData);
 	useMapData().$patch(gameMap);
-	await loadMapDataToResourceStore(mapData);
 	const coverResource = useResourceStore().getRecourceById(gameMap.info.coverImageId);
 	if (!coverResource) throw Error("读取封面失败");
 	const mapInfo: GameMapInDb = {
@@ -318,38 +350,46 @@ export async function loadGameMapFromFile(file: ArrayBuffer) {
 	return { gameMap, mapInfo };
 }
 
-async function loadMapDataToResourceStore(mapData: {
+function loadMapDataToResourceStore(mapData: {
 	id: string;
 	jsonData: string;
 	modelFiles: ProtoFileType[];
 	imageFiles: ProtoFileType[];
 }) {
 	const resourceStore = useResourceStore();
+	const prepared: ResourcesType[] = [];
+	try {
+		for (const imageResource of mapData.imageFiles) {
+			const blob = new Blob([imageResource.buffer as BlobPart], { type: `image/${imageResource.filetype}` });
+			const imageUrl = URL.createObjectURL(blob);
+			//添加图片到资源仓库
+			prepared.push({
+				id: imageResource.id,
+				name: imageResource.name,
+				fileType: imageResource.filetype,
+				url: imageUrl,
+				type: "image",
+			});
+		}
+		for (const modelResource of mapData.modelFiles) {
+			const blob = new Blob([modelResource.buffer as BlobPart], { type: `application/octet-stream` });
+			const modelUrl = URL.createObjectURL(blob);
+			//添加模型到资源仓库
+			prepared.push({
+				id: modelResource.id,
+				name: modelResource.name,
+				fileType: modelResource.filetype,
+				url: modelUrl,
+				type: "model",
+			});
+		}
+	} catch (error) {
+		for (const resource of prepared) URL.revokeObjectURL(resource.url);
+		throw error;
+	}
+	// 全部资源准备成功后统一替换，失败的自定义地图不会清空上一张地图。
 	resourceStore.clear();
-	for (const imageResource of mapData.imageFiles) {
-		const blob = new Blob([imageResource.buffer as BlobPart], { type: `image/${imageResource.filetype}` });
-		const imageUrl = URL.createObjectURL(blob);
-		//添加图片到资源仓库
-		resourceStore.add({
-			id: imageResource.id,
-			name: imageResource.name,
-			fileType: imageResource.filetype,
-			url: imageUrl,
-			type: "image",
-		});
-	}
-	for (const modelResource of mapData.modelFiles) {
-		const blob = new Blob([modelResource.buffer as BlobPart], { type: `application/octet-stream` });
-		const modelUrl = URL.createObjectURL(blob);
-		//添加模型到资源仓库
-		resourceStore.add({
-			id: modelResource.id,
-			name: modelResource.name,
-			fileType: modelResource.filetype,
-			url: modelUrl,
-			type: "model",
-		});
-	}
+	for (const resource of prepared) resourceStore.add(resource);
 }
 
 export async function getModelById(modelId: string) {

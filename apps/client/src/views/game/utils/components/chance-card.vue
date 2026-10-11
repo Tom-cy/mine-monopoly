@@ -28,7 +28,7 @@ const iconUrl = computed(() => {
 
 // 转换 \n 为真实换行符
 const formattedDescription = computed(() => {
-	return props.chanceCard.description.replace(/\\n/g, "\n");
+	return String(props.chanceCard.description ?? "").replace(/\\n/g, "\n");
 });
 </script>
 

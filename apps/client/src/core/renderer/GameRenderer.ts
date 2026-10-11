@@ -122,6 +122,9 @@ export class GameRenderer {
 	private playerPosition: Map<string, string> = new Map<string, string>();
 	private playerPendingWalks: Map<string, string> = new Map<string, string>(); // 防止同一玩家的走路动画并发执行
 	private requestAnimationFrameId: number = -1;
+	private destroyed = false;
+	private cleanupCallbacks: Array<() => void> = [];
+	private mountedPopovers = new Map<CSS2DObject, () => void>();
 
 	private playerWatchers: Map<
 		string,
@@ -222,21 +225,23 @@ export class GameRenderer {
 				const gammaPass = new ShaderPass(GammaCorrectionShader);
 				this.composer.addPass(gammaPass);
 
-				const { css2DObject: propertyCSS2DObject, appInstance: propertyInfoLabelInstance } = createCSS2DObjectFromVue(
-					PropertyInfoCard,
-					{
-						property: null,
-					},
-				);
+				const {
+					css2DObject: propertyCSS2DObject,
+					appInstance: propertyInfoLabelInstance,
+					unmount: unmountPropertyLabel,
+				} = createCSS2DObjectFromVue(PropertyInfoCard, { property: null });
 				this.propertyInfoLabel = propertyCSS2DObject;
 				this.propertyInfoLabelInstance = propertyInfoLabelInstance;
+				this.cleanupCallbacks.push(unmountPropertyLabel);
 
-				const { css2DObject: arrivedEventCSS2DObject, appInstance: arrivedEventLabelInstance } =
-					createCSS2DObjectFromVue(MapEventCard, {
-						property: null,
-					});
+				const {
+					css2DObject: arrivedEventCSS2DObject,
+					appInstance: arrivedEventLabelInstance,
+					unmount: unmountEventLabel,
+				} = createCSS2DObjectFromVue(MapEventCard, { mapEvent: null });
 				this.arrivedEventInfoLabel = arrivedEventCSS2DObject;
 				this.arrivedEventInfoLabelInstance = arrivedEventLabelInstance;
+				this.cleanupCallbacks.push(unmountEventLabel);
 
 				this.scene.add(this.propertyInfoLabel);
 				this.scene.add(this.arrivedEventInfoLabel);
@@ -269,6 +274,7 @@ export class GameRenderer {
 				});
 
 				const handleResize = () => {
+					if (this.destroyed) return;
 					this.camera.aspect = container.clientWidth / container.clientHeight; //相机视角长宽比
 					this.camera.updateProjectionMatrix();
 					this.renderer.setSize(container.clientWidth, container.clientHeight);
@@ -278,7 +284,12 @@ export class GameRenderer {
 					this.diceManager && this.diceManager.updateAspect(container.clientWidth / container.clientHeight);
 				};
 
-				window.addEventListener("resize", debounce(handleResize.bind(this), 500));
+				const resize = debounce(handleResize, 500, true);
+				window.addEventListener("resize", resize.fn);
+				this.cleanupCallbacks.push(() => {
+					window.removeEventListener("resize", resize.fn);
+					resize.cancel();
+				});
 
 				handleResize();
 			} catch (error) {
@@ -309,7 +320,7 @@ export class GameRenderer {
 
 		loadingMask.text = "正在进行初始化加载：机会卡、场景设置";
 		await this.runInitStage("chance-card-assets", () => this.initChanceCard());
-		await this.initMapPathChoiceArrowModel();
+		await this.runInitStage("scene-effects", () => this.initMapPathChoiceArrowModel());
 		await this.runInitStage("scene-effects", async () => {
 			this.initLight();
 			this.initOutlinePass();
@@ -357,6 +368,7 @@ export class GameRenderer {
 				updatePointer(touch.clientX, touch.clientY);
 			};
 			window.addEventListener("touchmove", onPointerMove, { passive: false });
+			this.cleanupCallbacks.push(() => window.removeEventListener("touchmove", onPointerMove));
 		} else {
 			const onPointerMove = (event: MouseEvent) => {
 				// 只有当鼠标目标在 canvas 上时才更新指针
@@ -364,10 +376,12 @@ export class GameRenderer {
 				updatePointer(event.clientX, event.clientY);
 			};
 			window.addEventListener("pointermove", onPointerMove);
+			this.cleanupCallbacks.push(() => window.removeEventListener("pointermove", onPointerMove));
 		}
 
 		await this.runInitStage("render-loop", async () => {
 			const loop = () => {
+				if (this.destroyed) return;
 				this.requestAnimationFrameId = requestAnimationFrame(loop);
 
 				// 更新 GLB 模型动画
@@ -429,15 +443,44 @@ export class GameRenderer {
 
 	private async runInitStage<T>(stage: GameInitStage, fn: () => Promise<T> | T): Promise<T> {
 		try {
-			return await fn();
+			this.assertActive();
+			const result = await fn();
+			this.assertActive();
+			return result;
 		} catch (error) {
 			throw wrapGameInitError(stage, error);
 		}
 	}
 
+	private assertActive(): void {
+		if (this.destroyed) throw new Error("游戏场景已关闭");
+	}
+
+	private onEvent(eventName: string, listener: (...args: any[]) => void): void {
+		const eventBus = useEventBus();
+		const guarded = (...args: any[]) => {
+			if (!this.destroyed) return listener(...args);
+		};
+		eventBus.on(eventName, guarded);
+		this.cleanupCallbacks.push(() => eventBus.remove(eventName, guarded));
+	}
+
+	private createTrackedPopover(component: Component, props?: Record<string, any>) {
+		const result = createCSS2DObjectFromVue(component, props);
+		const unmount = () => {
+			if (!this.mountedPopovers.has(result.css2DObject)) return;
+			this.mountedPopovers.delete(result.css2DObject);
+			result.unmount();
+			this.scene.remove(result.css2DObject);
+		};
+		this.mountedPopovers.set(result.css2DObject, unmount);
+		return { ...result, unmount };
+	}
+
 	private async initMapPathChoiceArrowModel() {
 		try {
 			const arrowTemplate = (await loadModel("arrow.glb")).scene;
+			this.assertActive();
 			setMapPathChoiceArrowFactory(() => {
 				const arrow = arrowTemplate.clone(true);
 				arrow.scale.setScalar(0.4); // 小一点；1 为模型原始大小
@@ -450,6 +493,7 @@ export class GameRenderer {
 
 	private async initDiceManager() {
 		const diceModel = (await loadModel("dice.glb")).scene;
+		this.assertActive();
 		diceModel.scale.set(0.8, 0.8, 0.8);
 		this.diceManager = new DiceManager(diceModel);
 		this.diceManager.updateAspect(this.container.clientWidth / this.container.clientHeight);
@@ -477,6 +521,7 @@ export class GameRenderer {
 		const enableShadow = useSettig().enableShadow;
 		for await (const modelResource of modelResourcesList) {
 			const gltf = await getModelById(modelResource.id);
+			this.assertActive();
 			const model = gltf.scene;
 			enableShadows(model, enableShadow);
 
@@ -541,6 +586,10 @@ export class GameRenderer {
 				const iconUrl = useResourceStore().getRecourceById(arrivedEvent.iconId)?.url;
 				if (!iconUrl) continue;
 				const texture = await textureLoader.loadAsync(iconUrl);
+				if (this.destroyed) {
+					texture.dispose();
+					this.assertActive();
+				}
 				texture.colorSpace = THREE.SRGBColorSpace;
 				const planeGeometry = new THREE.PlaneGeometry(1, 1);
 				const planeMaterial = new THREE.MeshBasicMaterial({
@@ -690,6 +739,7 @@ export class GameRenderer {
 		sourcePlayerId: string,
 		targetIdList: string[],
 	) {
+		if (this.destroyed) return;
 		this.chanceCardAnimationQueue.push({
 			animationId,
 			chanceCard,
@@ -714,7 +764,7 @@ export class GameRenderer {
 		this.isProcessingChanceCardAnimation = true;
 
 		try {
-			while (this.chanceCardAnimationQueue.length > 0) {
+			while (!this.destroyed && this.chanceCardAnimationQueue.length > 0) {
 				const animationTask = this.chanceCardAnimationQueue.shift();
 				if (!animationTask) break;
 
@@ -733,6 +783,7 @@ export class GameRenderer {
 
 					// 播放飞行动画
 					await this.playChanceCardFlyAnimation(chanceCard, sourcePlayer.model.position, targetPositions);
+					if (this.destroyed) break;
 
 					// 通知服务器动画完成
 					const monopolyClient = useMonopolyClient();
@@ -824,6 +875,10 @@ export class GameRenderer {
 		// 创建3D卡片对象
 		const card3d = new ChanceCard3D(chanceCard, iconUrl, this.scene);
 		await card3d.createCard();
+		if (this.destroyed) {
+			card3d.dispose();
+			this.assertActive();
+		}
 
 		return card3d;
 	}
@@ -911,6 +966,7 @@ export class GameRenderer {
 		const timeline = gsap.timeline({
 			onComplete: () => {
 				void (async () => {
+					if (this.destroyed) return;
 					// 动画完成后清理
 					card3d.dispose();
 					this.activeChanceCard3Ds = this.activeChanceCard3Ds.filter((c) => c !== card3d);
@@ -1153,7 +1209,7 @@ export class GameRenderer {
 
 	private initEventListener() {
 		// 监听当前回合玩家变化
-		useEventBus().on("game-currentPlayerIdInRound", (newPlayerId: string, oldPlayerId: string) => {
+		this.onEvent("game-currentPlayerIdInRound", (newPlayerId: string, oldPlayerId: string) => {
 			if (!this.isTurnFocusEnabled || !newPlayerId || newPlayerId === oldPlayerId) return;
 			this.focusPlayerById(newPlayerId);
 		});
@@ -1161,23 +1217,23 @@ export class GameRenderer {
 		const mapDataStore = useMapData();
 
 		// 监听画质变化事件
-		useEventBus().on("graphics:quality:change", ({ quality }: { quality: "low" | "medium" | "high" }) => {
+		this.onEvent("graphics:quality:change", ({ quality }: { quality: "low" | "medium" | "high" }) => {
 			const ratioMap = { low: 0.85, medium: 1.0, high: 2.0 };
 			const newPixelRatio = window.devicePixelRatio * ratioMap[quality];
 			this.applyPixelRatio(newPixelRatio);
 		});
 
 		// 监听阴影变化事件
-		useEventBus().on("graphics:shadow:change", ({ enable }: { enable: boolean }) => {
+		this.onEvent("graphics:shadow:change", ({ enable }: { enable: boolean }) => {
 			this.applyShadowSetting(enable);
 		});
 
 		// 监听视角锁定变化事件
-		useEventBus().on("graphics:lockRole:change", ({ lockRole }: { lockRole: boolean }) => {
+		this.onEvent("graphics:lockRole:change", ({ lockRole }: { lockRole: boolean }) => {
 			this.isLockingRoleFromSetting = lockRole;
 		});
 
-		useEventBus().on("graphics:turnFocus:change", ({ enable }: { enable: boolean }) => {
+		this.onEvent("graphics:turnFocus:change", ({ enable }: { enable: boolean }) => {
 			this.isTurnFocusEnabled = enable;
 			if (enable) {
 				const currentPlayerId = useGameData().currentPlayerIdInRound;
@@ -1188,17 +1244,17 @@ export class GameRenderer {
 		});
 
 		// 监听模型动画变化事件
-		useEventBus().on("graphics:animation:change", ({ enable }: { enable: boolean }) => {
+		this.onEvent("graphics:animation:change", ({ enable }: { enable: boolean }) => {
 			this.applyModelAnimationSetting(enable);
 		});
 
 		// 监听相机回归视角事件
-		useEventBus().on("camera:focus:self", () => {
+		this.onEvent("camera:focus:self", () => {
 			this.focusOnSelf();
 		});
 
 		// 监听窗口恢复焦点事件
-		useEventBus().on("window:focus-restored", () => {
+		this.onEvent("window:focus-restored", () => {
 			this.reloadScene();
 		});
 
@@ -1230,11 +1286,11 @@ export class GameRenderer {
 			),
 		);
 
-		useEventBus().on("player-isThinking", (playerId: string, _oldValue: boolean, newValue: boolean) => {
+		this.onEvent("player-isThinking", (playerId: string, _oldValue: boolean, newValue: boolean) => {
 			this.syncPlayerThinkingMarker(playerId, Boolean(newValue));
 		});
 
-		useEventBus().on(
+		this.onEvent(
 			"player-walk",
 			async (
 				walkPlayerId: string,
@@ -1251,7 +1307,7 @@ export class GameRenderer {
 					await new Promise<void>((resolve) => {
 						const checkPending = () => {
 							const currentPending = this.playerPendingWalks.get(walkPlayerId);
-							if (!currentPending) {
+							if (this.destroyed || !currentPending) {
 								resolve();
 							} else {
 								// 继续等待，使用 setTimeout 避免阻塞
@@ -1261,6 +1317,7 @@ export class GameRenderer {
 						checkPending();
 					});
 				}
+				if (this.destroyed) return;
 
 				// 标记动画开始
 				this.playerPendingWalks.set(walkPlayerId, walkId);
@@ -1304,6 +1361,7 @@ export class GameRenderer {
 					} finally {
 						this.playerPendingWalks.delete(walkPlayerId);
 					}
+					if (this.destroyed) return;
 
 					this.currentFocusModule = null;
 					this.isLockingRole = false;
@@ -1318,7 +1376,7 @@ export class GameRenderer {
 				}
 			},
 		);
-		useEventBus().on(
+		this.onEvent(
 			"player-tp",
 			async (tpPlayerId: string, positionIndex: number, walkId: string, mapItemId?: string) => {
 				const playerEntity = this.getPlayerEntity(tpPlayerId);
@@ -1340,6 +1398,7 @@ export class GameRenderer {
 						duration: 0.5,
 						ease: "back.in(1.7)",
 					});
+					if (this.destroyed) return;
 
 					// 3. 执行位移 (瞬间) - 修复高度问题
 					const resolvedMapItemId = mapItemId ?? this.getMapItemIdByIndex(positionIndex);
@@ -1358,6 +1417,7 @@ export class GameRenderer {
 						delay: 0.1,
 						ease: "back.out(1.7)",
 					});
+					if (this.destroyed) return;
 
 					this.currentFocusModule = null;
 					this.isLockingRole = false;
@@ -1371,22 +1431,22 @@ export class GameRenderer {
 			},
 		);
 
-		useEventBus().on("player-money", async (playerId: string, oldMoney: number, newMoney: number) => {
+		this.onEvent("player-money", async (playerId: string, oldMoney: number, newMoney: number) => {
 			const moneyDiff = newMoney - oldMoney;
 			this.spawnMoneyParticleOnPlayer(playerId, moneyDiff);
 		});
-		useEventBus().on("player-isBankrupted", (playerId: string, oldValue: boolean, newValue: boolean) => {
+		this.onEvent("player-isBankrupted", (playerId: string, oldValue: boolean, newValue: boolean) => {
 			if (!oldValue && newValue) {
 				this.removePlayerEntity(playerId);
 			}
 		});
 		for (const key of ["level", "owner", "costList"]) {
-			useEventBus().on(`property-${key}`, async (propertyId: string) => {
+			this.onEvent(`property-${key}`, async (propertyId: string) => {
 				this.updateBuilding(useGameData().getPropertyById(propertyId)!);
 			});
 		}
 
-		useEventBus().on("dice-roll", async (diceRes: DiceResult[]) => {
+		this.onEvent("dice-roll", async (diceRes: DiceResult[]) => {
 			if (!this.diceManager) return;
 
 			// 将请求加入队列
@@ -1399,7 +1459,7 @@ export class GameRenderer {
 		});
 
 		// 监听机会卡使用事件
-		useEventBus().on(
+		this.onEvent(
 			"chance-card-use",
 			async (animationInfo: {
 				animationId: string;
@@ -1423,7 +1483,7 @@ export class GameRenderer {
 
 		this.isProcessingDiceRoll = true;
 
-		while (this.diceRollQueue.length > 0) {
+		while (!this.destroyed && this.diceRollQueue.length > 0) {
 			const diceRes = this.diceRollQueue.shift();
 			if (!diceRes) break;
 
@@ -1494,13 +1554,23 @@ export class GameRenderer {
 	}
 
 	public destroy() {
+		if (this.destroyed) return;
+		this.destroyed = true;
 		cancelAnimationFrame(this.requestAnimationFrameId);
+		this.cleanupCallbacks.splice(0).forEach((cleanup) => cleanup());
+		Array.from(this.mountedPopovers.values()).forEach((unmount) => unmount());
+		this.activeMoneyParticles.clear();
+		this.chanceCardAnimationQueue = [];
+		this.diceRollQueue = [];
+		this.playerPendingWalks.clear();
+		this.activeChanceCard3Ds.forEach((card) => card.dispose());
+		this.activeChanceCard3Ds = [];
+		gsap.killTweensOf([this.camera.position, this.controls.target]);
 		Array.from(this.playerWatchers.values()).forEach((watchers) => {
 			watchers.InfoWatcher && watchers.InfoWatcher();
 			// watchers.moneyWatcher && watchers.moneyWatcher();
 			watchers.bankruptWatcher && watchers.bankruptWatcher();
 		});
-		useEventBus().removeAll();
 		this.commonWatchers.forEach((f) => f());
 		this.clearAllSpeechBubbles();
 		this.clearAllThinkingMarkers();
@@ -1572,6 +1642,7 @@ export class GameRenderer {
 				if (!modelResource) throw Error("初始化玩家模型时: 找不到模型文件");
 				const playerEntity = new PlayerModel();
 				await playerEntity.load(modelResource.url, modelResource.fileType);
+				this.assertActive();
 				this.playerEntities.set(playerInfo.id, playerEntity);
 				const textSprite = new TextSprite(
 					`${playerInfo.user.username}${playerInfo.user.userId === getCurrentClientPlayerId() ? " (你)" : ""}`,
@@ -2433,7 +2504,7 @@ export class GameRenderer {
 		const position = new THREE.Vector3();
 		position.copy(playerEntity.model.position);
 
-		const { css2DObject, appInstance, unmount } = createCSS2DObjectFromVue(component, props);
+		const { css2DObject, unmount } = this.createTrackedPopover(component, props);
 		css2DObject.position.copy(position);
 		this.scene.add(css2DObject);
 		if (delay)
@@ -2808,7 +2879,7 @@ export class GameRenderer {
 
 		const size = this.getParticleSize(amount);
 
-		const { css2DObject, unmount } = createCSS2DObjectFromVue(MoneyParticle3D, {
+		const { css2DObject, unmount } = this.createTrackedPopover(MoneyParticle3D, {
 			amount,
 			size,
 			onComplete: () => {

@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { __PROTOCOL__ } from "@src/../global.config";
 import { MapEvent } from "@mine-monopoly/types";
 import { useResourceStore } from "@src/store/game";
 
@@ -10,25 +9,25 @@ const arrivedEvent = ref<MapEvent | null>(props.mapEvent);
 
 // 转换 \n 为真实换行符
 const formattedDescription = computed(() => {
-	return arrivedEvent.value?.description.replace(/\\n/g, '\n') || "";
+	return String(arrivedEvent.value?.description ?? "").replace(/\\n/g, "\n");
 });
 
-function updateArrivedEvent(newArrivedEvent: MapEvent) {
+function updateArrivedEvent(newArrivedEvent: MapEvent | null) {
 	arrivedEvent.value = newArrivedEvent;
 }
 
 defineExpose({ updateArrivedEvent });
 
 const iconUrl = computed(() => {
-	if (!arrivedEvent.value) return "qwe";
-	return useResourceStore().getRecourceById(arrivedEvent.value.iconId)?.url || "asd";
+	if (!arrivedEvent.value) return "";
+	return useResourceStore().getRecourceById(arrivedEvent.value.iconId)?.url || "";
 });
 </script>
 
 <template>
 	<div class="arrived-event-info felt-card" v-if="arrivedEvent">
 		<div class="info">
-			<img :src="iconUrl" alt="" />
+			<img v-if="iconUrl" :src="iconUrl" alt="" />
 			<span>{{ arrivedEvent.name }}</span>
 		</div>
 		<div class="description">

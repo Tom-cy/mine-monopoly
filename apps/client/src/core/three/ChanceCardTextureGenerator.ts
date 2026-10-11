@@ -132,8 +132,6 @@ export class ChanceCardTextureGenerator {
 
 			container.appendChild(wrapper);
 
-			app.mount(wrapper);
-
 			// 3. 等待组件完全渲染（包括图片加载）
 			let settled = false;
 			const cleanup = () => {
@@ -149,8 +147,17 @@ export class ChanceCardTextureGenerator {
 				cleanup();
 				reject(new Error("渲染超时：requestAnimationFrame 未触发"));
 			}, 5000);
+			try {
+				app.mount(wrapper);
+			} catch (error) {
+				clearTimeout(timeout);
+				cleanup();
+				reject(error);
+				return;
+			}
 
 			requestAnimationFrame(async () => {
+				if (settled) return;
 				clearTimeout(timeout);
 				try {
 					// 额外等待确保图片加载完成

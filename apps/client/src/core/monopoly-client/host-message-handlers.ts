@@ -35,6 +35,7 @@ import { useGameData, useMapData, useResourceStore } from "@src/store/game";
 import { getCurrentClientPlayerId, useLocalParty } from "@src/store/local-party";
 import { GameMap } from "@mine-monopoly/utils/protos/game-map";
 import { loadGameMapFromFile, loadGameMapFromServer } from "@src/utils/file/game-map";
+import { MAP_LOAD_TIMEOUT_MS, assertMapLoadActive } from "@src/utils/file/map-loading";
 import { base64ToArrayBuffer } from "@mine-monopoly/utils";
 import { showTargetSelector } from "@src/components/common/target-seletor";
 import { showItemSelector } from "@src/components/utils/item-selector";
@@ -73,6 +74,66 @@ let receiveState: ChunkReceiveState | null = null;
 let activeCustomMapDescriptor: CustomMapDescriptor | null = null;
 /** 地图加载完成前，暂存新地图默认参数，避免旧 RoomInfo 覆盖它。 */
 let pendingMapDefaultGameSetting: GameSetting | null = null;
+interface ClientMapLoad {
+	client: MonopolyClient;
+	controller: AbortController;
+	mapLoadSessionId?: string;
+	timeout: ReturnType<typeof setTimeout> | null;
+}
+let activeMapLoad: ClientMapLoad | null = null;
+
+/** 离房或销毁连接时取消下载，防止迟到的地图结果污染下一间房。 */
+export function cancelClientMapLoad(client?: MonopolyClient): void {
+	if (client && activeMapLoad?.client !== client) return;
+	if (activeMapLoad) {
+		if (activeMapLoad.timeout !== null) clearTimeout(activeMapLoad.timeout);
+		activeMapLoad.controller.abort(new Error("地图加载已取消"));
+		activeMapLoad = null;
+	}
+	activeCustomMapDescriptor = null;
+	pendingMapDefaultGameSetting = null;
+	clearReceiveState();
+}
+
+function beginClientMapLoad(client: MonopolyClient, mapLoadSessionId?: string): ClientMapLoad {
+	cancelClientMapLoad();
+	const load: ClientMapLoad = { client, controller: new AbortController(), mapLoadSessionId, timeout: null };
+	activeMapLoad = load;
+	load.timeout = setTimeout(() => {
+		if (activeMapLoad === load) void reportMapLoadFailure(client, "地图资源加载超时，请检查网络后重新入房", load);
+	}, MAP_LOAD_TIMEOUT_MS);
+	return load;
+}
+
+async function reportMapLoadFailure(client: MonopolyClient, reason: string, load = activeMapLoad): Promise<void> {
+	if (load && (activeMapLoad !== load || load.controller.signal.aborted)) return;
+	const mapLoadSessionId = load?.mapLoadSessionId;
+	cancelClientMapLoad(client);
+	useLoading().hideLoading();
+	await client.sendMsg({
+		type: SocketMsgType.Operation,
+		source: SocketMsgSource.Client,
+		data: { operateType: OperateType.MapResourceLoaded, data: undefined },
+		extra: { mapLoadSessionId, initStatus: "failed", reason },
+	});
+	if (activeMapLoad) return;
+	if (useLocalParty().isActive) {
+		client.resumeHeartBeat();
+		FPMessage({ type: "error", message: `地图加载失败，请重新选择地图：${reason}` });
+		return;
+	}
+	// session.close 会停止 HTTP 保活并释放后台席位；不能只关掉加载弹窗。
+	void client.destory().catch(() => undefined);
+	useRoomInfo().$reset();
+	useChat().$reset();
+	useGameLog().$reset();
+	useGameData().$reset();
+	useMapData().$reset();
+	useResourceStore().clear();
+	void router.replace({ name: "room-router" }).finally(() => {
+		FPMessage({ type: "error", message: `地图加载失败，已退出房间：${reason}` });
+	});
+}
 
 /** 整体传输超时基础值（毫秒），实际按块数动态计算（与主机端一致） */
 const TRANSFER_TIMEOUT = 60000;
@@ -111,9 +172,8 @@ function resetChunkTimeout(): void {
 }
 
 function handleTransferTimeout(reason: string): void {
-	clearReceiveState();
-	useLoading().hideLoading();
-	FPMessage({ type: "error", message: `地图传输失败: ${reason}` });
+	const load = activeMapLoad;
+	if (load) void reportMapLoadFailure(load.client, `地图传输失败：${reason}`, load);
 }
 
 import { logErrorWithOptions } from "@src/utils/log/error-helpers";
@@ -294,7 +354,7 @@ const handleJoinRoomReply: ServerMessageHandler<SocketMsgType.JoinRoom> = (msg) 
 };
 
 const handleLeaveRoomReply: ServerMessageHandler<SocketMsgType.LeaveRoom> = (msg, client) => {
-	clearReceiveState();
+	cancelClientMapLoad(client);
 	const notification = msg.msg || { type: "success" as const, content: "退出房间" };
 	useRoomInfo().$reset();
 	useChat().$reset();
@@ -307,7 +367,7 @@ const handleLeaveRoomReply: ServerMessageHandler<SocketMsgType.LeaveRoom> = (msg
 };
 
 const handleKickOutReply: ServerMessageHandler<SocketMsgType.KickOut> = (msg, client) => {
-	clearReceiveState();
+	cancelClientMapLoad(client);
 	useRoomInfo().$reset();
 	useChat().$reset();
 	useGameLog().$reset();
@@ -349,22 +409,26 @@ const handleRoomInfoReply: ServerMessageHandler<SocketMsgType.RoomInfo> = (msg) 
 
 const handleChangeMap: ServerMessageHandler<SocketMsgType.ChangeMap> = async (msg, client) => {
 	// 旧主机的直接换图消息没有 descriptor；清空旧会话，避免迟到分块覆盖新地图。
-	activeCustomMapDescriptor = null;
-	clearReceiveState();
-	await handleChangeMapInternal(msg, client);
+	const load = beginClientMapLoad(client);
+	await handleChangeMapInternal(msg, client, undefined, true, load);
 };
 
 const handleChangeMapInternal = async (
 	msg: SocketMessage<SocketMsgType.ChangeMap, SocketMsgSource.Server>,
 	client: MonopolyClient,
 	mapLoadSessionId?: string,
+	reportFailure = true,
+	load = activeMapLoad,
 ): Promise<boolean> => {
 	try {
+		if (load && activeMapLoad !== load) return false;
+		const signal = load?.controller.signal;
+		assertMapLoadActive(signal);
 		const data = msg.data;
 		let gameMap, mapInfo;
 		switch (data.from) {
 			case "server": {
-				const res = await loadGameMapFromServer(data.data);
+				const res = await loadGameMapFromServer(data.data, { signal });
 				gameMap = res.gameMap;
 				mapInfo = res.mapInfo;
 				break;
@@ -373,15 +437,15 @@ const handleChangeMapInternal = async (
 				// 兼容新版二进制直传与旧版 base64 字符串
 				const raw = data.data;
 				const arrayBuffer =
-					raw instanceof Uint8Array
-						? (raw.slice().buffer as ArrayBuffer)
-						: base64ToArrayBuffer(raw);
-				const res = await loadGameMapFromFile(arrayBuffer);
+					raw instanceof Uint8Array ? (raw.slice().buffer as ArrayBuffer) : base64ToArrayBuffer(raw);
+				const res = await loadGameMapFromFile(arrayBuffer, { signal });
 				gameMap = res.gameMap;
 				mapInfo = res.mapInfo;
 				break;
 			}
 		}
+		assertMapLoadActive(signal);
+		if (load && activeMapLoad !== load) return false;
 
 		//版本校验
 		const editorVersion = gameMap.info?.editorVersion;
@@ -436,32 +500,33 @@ const handleChangeMapInternal = async (
 		useRoomInfo().mapInfo = mapInfo;
 		useRoomInfo().mapId = mapInfo.id;
 		//地图加载完毕后发送信号
-		client.sendMsg({
+		const acknowledgement = await client.sendMsg({
 			type: SocketMsgType.Operation,
 			source: SocketMsgSource.Client,
 			data: { operateType: OperateType.MapResourceLoaded, data: undefined },
 			extra: mapLoadSessionId ? { mapLoadSessionId } : undefined,
 		});
+		if (!acknowledgement.ok) throw new Error("地图加载完成确认发送失败，请重新入房");
+		assertMapLoadActive(signal);
+		if (load && activeMapLoad !== load) return false;
+		if (load?.timeout !== null && load?.timeout !== undefined) {
+			clearTimeout(load.timeout);
+			load.timeout = null;
+		}
 		useLoading().hideLoading();
 		return true;
 	} catch (e: any) {
+		if (load && (activeMapLoad !== load || load.controller.signal.aborted)) return false;
 		logErrorWithOptions({
 			category: ErrorCategory.GAME_RUNTIME,
 			message: `地图加载失败: ${e.message}`,
 			error: e instanceof Error ? e : undefined,
-			extraInfo: { mapData: msg.data },
+			extraInfo: { mapSource: msg.data.from, mapLoadSessionId },
 		});
-		FPMessageBox({
-			title: "地图加载失败",
-			content: `地图数据加载过程中发生错误，请通知房主重新选择地图。\n\n错误详情: ${e.message}`,
-			confirmText: "确定",
-			showCancel: false,
-		}).catch(() => {});
-		pendingMapDefaultGameSetting = null;
-		useLoading().hideLoading();
+		if (reportFailure) await reportMapLoadFailure(client, e.message || "地图文件无法加载", load);
 		return false;
 	} finally {
-		client.resumeHeartBeat();
+		if (!load || (activeMapLoad === load && !load.controller.signal.aborted)) client.resumeHeartBeat();
 	}
 };
 
@@ -1001,8 +1066,8 @@ async function handleCustomMapDescriptor(
 	client: MonopolyClient,
 ): Promise<void> {
 	const descriptor = msg.data;
+	const load = beginClientMapLoad(client, descriptor.mapLoadSessionId);
 	activeCustomMapDescriptor = descriptor;
-	clearReceiveState();
 	useLoading().showLoading("正在检查本地地图...");
 
 	const platform = window.platformAPI;
@@ -1022,6 +1087,13 @@ async function handleCustomMapDescriptor(
 		return;
 	}
 
+	// 新版客户端先表明支持描述协议，避免较慢的本地仓库查询触发旧协议回退。
+	sendMapLocalCheck(client, {
+		mapLoadSessionId: descriptor.mapLoadSessionId,
+		fileSha256: descriptor.fileSha256,
+		status: "miss",
+		reason: "正在检查本地地图",
+	});
 	try {
 		const local = await platform.findLocalMapByHash({ sha256: descriptor.fileSha256, size: descriptor.fileSize });
 		if (!isCurrentCustomMapSession(descriptor.mapLoadSessionId)) return;
@@ -1055,9 +1127,15 @@ async function handleCustomMapDescriptor(
 			return;
 		}
 		const loaded = await handleChangeMapInternal(
-			{ type: SocketMsgType.ChangeMap, source: SocketMsgSource.Server, data: { from: "custom", data: new Uint8Array(local.data) } },
+			{
+				type: SocketMsgType.ChangeMap,
+				source: SocketMsgSource.Server,
+				data: { from: "custom", data: new Uint8Array(local.data) },
+			},
 			client,
 			descriptor.mapLoadSessionId,
+			false,
+			load,
 		);
 		if (!isCurrentCustomMapSession(descriptor.mapLoadSessionId)) return;
 		if (!loaded) {
@@ -1073,7 +1151,10 @@ async function handleCustomMapDescriptor(
 				fileSha256: descriptor.fileSha256,
 				reason: "local-load-failed",
 			});
-			FPMessage({ type: "warning", message: `本地地图“${local.fileName ?? descriptor.mapName}”无效或不兼容，已改为从房主获取。` });
+			FPMessage({
+				type: "warning",
+				message: `本地地图“${local.fileName ?? descriptor.mapName}”无效或不兼容，已改为从房主获取。`,
+			});
 			return;
 		}
 		sendMapLocalCheck(client, {
@@ -1101,10 +1182,15 @@ async function handleCustomMapDescriptor(
 	}
 }
 
-const handleMapChunkStart: ServerMessageHandler<SocketMsgType.MapChunkStart> = (msg) => {
+const handleMapChunkStart: ServerMessageHandler<SocketMsgType.MapChunkStart> = (msg, client) => {
 	const data = msg.data;
 	if (activeCustomMapDescriptor && data.mapLoadSessionId !== activeCustomMapDescriptor.mapLoadSessionId) {
 		console.warn("[MapTransfer] Ignored stale MapChunkStart", data.mapLoadSessionId);
+		return;
+	}
+	if (!activeMapLoad || activeMapLoad.client !== client) beginClientMapLoad(client, data.mapLoadSessionId);
+	if (!Number.isInteger(data.totalChunks) || data.totalChunks < 1 || data.totalChunks > 8192) {
+		void reportMapLoadFailure(client, "地图传输分块数量无效");
 		return;
 	}
 	clearReceiveState();
@@ -1114,9 +1200,12 @@ const handleMapChunkStart: ServerMessageHandler<SocketMsgType.MapChunkStart> = (
 		totalBytes: data.totalBytes ?? 0,
 		receivedBytes: 0,
 		receivedChunks: new Map(),
-		transferTimeoutId: window.setTimeout(() => {
-			handleTransferTimeout("传输超时");
-		}, calcTransferTimeout(data.totalChunks, data.transferTimeout)),
+		transferTimeoutId: window.setTimeout(
+			() => {
+				handleTransferTimeout("传输超时");
+			},
+			calcTransferTimeout(data.totalChunks, data.transferTimeout),
+		),
 		chunkTimeoutId: null,
 		lastProgressBucket: -1,
 	};
@@ -1124,6 +1213,7 @@ const handleMapChunkStart: ServerMessageHandler<SocketMsgType.MapChunkStart> = (
 		data.totalBytes ? `地图加载中... 0 B / ${formatBytes(data.totalBytes)}` : "地图加载中...",
 		0,
 	);
+	resetChunkTimeout();
 };
 
 const handleMapChunk: ServerMessageHandler<SocketMsgType.MapChunk> = (msg) => {
@@ -1136,9 +1226,13 @@ const handleMapChunk: ServerMessageHandler<SocketMsgType.MapChunk> = (msg) => {
 		console.warn("[MapTransfer] Ignored stale map chunk", data.mapLoadSessionId);
 		return;
 	}
+	if (!Number.isInteger(data.chunkIndex) || data.chunkIndex < 0 || data.chunkIndex >= receiveState.totalChunks) {
+		handleTransferTimeout("地图分块序号无效");
+		return;
+	}
+	if (receiveState.receivedChunks.has(data.chunkIndex)) return;
 	// 兼容旧版 base64 字符串分块与新版二进制分块
-	const chunkBytes =
-		typeof data.data === "string" ? new TextEncoder().encode(data.data) : data.data;
+	const chunkBytes = typeof data.data === "string" ? new TextEncoder().encode(data.data) : data.data;
 	receiveState.receivedChunks.set(data.chunkIndex, chunkBytes);
 	receiveState.receivedBytes += chunkBytes.byteLength;
 	const received = receiveState.receivedChunks.size;
@@ -1166,15 +1260,15 @@ const handleMapChunkEnd: ServerMessageHandler<SocketMsgType.MapChunkEnd> = async
 		return;
 	}
 	const state = receiveState;
+	const load = activeMapLoad;
 	if (state.mapLoadSessionId !== msg.data.mapLoadSessionId) {
 		console.warn("[MapTransfer] Ignored stale MapChunkEnd", msg.data.mapLoadSessionId);
 		return;
 	}
 	clearReceiveState();
 	try {
-		const sortedChunks = Array.from({ length: state.totalChunks }, (_, i) =>
-			state.receivedChunks.get(i),
-		);
+		if (!msg.data.success) throw new Error("房主未完成地图传输");
+		const sortedChunks = Array.from({ length: state.totalChunks }, (_, i) => state.receivedChunks.get(i));
 		if (sortedChunks.some((chunk) => chunk === undefined)) {
 			throw new Error("缺少数据分块");
 		}
@@ -1182,6 +1276,7 @@ const handleMapChunkEnd: ServerMessageHandler<SocketMsgType.MapChunkEnd> = async
 		let totalLength = 0;
 		for (const chunk of sortedChunks) totalLength += (chunk as Uint8Array).byteLength;
 		const fullData = new Uint8Array(totalLength);
+		if (state.totalBytes > 0 && totalLength !== state.totalBytes) throw new Error("地图文件大小与传输描述不一致");
 		let offset = 0;
 		for (const chunk of sortedChunks) {
 			const bytes = chunk as Uint8Array;
@@ -1200,8 +1295,10 @@ const handleMapChunkEnd: ServerMessageHandler<SocketMsgType.MapChunkEnd> = async
 			{ type: SocketMsgType.ChangeMap, source: SocketMsgSource.Server, data: mapInfo },
 			client,
 			state.mapLoadSessionId,
+			true,
+			load,
 		);
-		if (!loaded) throw new Error("地图文件无法加载");
+		if (!loaded) return;
 		if (descriptor && window.platformAPI?.saveReceivedLocalMap) {
 			void window.platformAPI.saveReceivedLocalMap({
 				sha256: descriptor.fileSha256,
@@ -1217,22 +1314,11 @@ const handleMapChunkEnd: ServerMessageHandler<SocketMsgType.MapChunkEnd> = async
 			error: e instanceof Error ? e : undefined,
 		});
 		FPMessage({ type: "error", message: `地图加载失败: ${e.message}` });
-		void client.sendMsg({
-			type: SocketMsgType.Operation,
-			source: SocketMsgSource.Client,
-			data: { operateType: OperateType.MapResourceLoaded, data: undefined },
-			extra: { mapLoadSessionId: state.mapLoadSessionId, initStatus: "failed", reason: e.message },
-		});
-		useLoading().hideLoading();
-		client.resumeHeartBeat();
+		await reportMapLoadFailure(client, e.message || "地图文件无法加载", load);
 	}
 };
 
-const handleMapChunkAbort: ServerMessageHandler<SocketMsgType.MapChunkAbort> = (msg) => {
+const handleMapChunkAbort: ServerMessageHandler<SocketMsgType.MapChunkAbort> = (msg, client) => {
 	if (activeCustomMapDescriptor && msg.data.mapLoadSessionId !== activeCustomMapDescriptor.mapLoadSessionId) return;
-	clearReceiveState();
-	useLoading().hideLoading();
-	FPMessage({ type: "warning", message: `地图传输已中止: ${msg.data.reason || "未知原因"}` });
-	const client = useMonopolyClient();
-	client.resumeHeartBeat();
+	void reportMapLoadFailure(client, `地图传输已中止：${msg.data.reason || "未知原因"}`);
 };

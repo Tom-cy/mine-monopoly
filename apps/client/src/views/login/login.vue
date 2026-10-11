@@ -3,6 +3,8 @@ import { ref, onBeforeUnmount, reactive, onMounted, nextTick, watch } from "vue"
 import router from "@src/router";
 import { randomString, setTimeOutAsync } from "@src/utils";
 import { startTokenRefreshTimer, ensureValidAuth } from "@src/utils/api";
+import type { AccountAuth } from "@src/utils/api/types";
+import { tokenClaims } from "@src/utils/auth/session";
 import {
 	clearRealmSession,
 	getAccountProfile,
@@ -47,11 +49,14 @@ async function handleFirstClick() {
 }
 
 let accountLoad = 0;
-async function loadAccount(forceSelect = false) {
+async function loadAccount(forceSelect = false, freshLogin?: AccountAuth) {
 	const request = ++accountLoad;
+	const sessionId = tokenClaims(getAccountToken() ?? "")?.sessionId;
 	showServers.value = false;
-	const account = await ensureValidAuth();
-	if (disposed || request !== accountLoad) return;
+	// The login response already validated this account; restored sessions still require /account/me.
+	const account = freshLogin ? freshLogin.account : await ensureValidAuth();
+	if (disposed || request !== accountLoad || sessionId !== tokenClaims(getAccountToken() ?? "")?.sessionId) return;
+	if (freshLogin && freshLogin.token !== getAccountToken()) return;
 	if (!account) {
 		showLoginMode.value = true;
 		return;
@@ -70,10 +75,11 @@ async function loadAccount(forceSelect = false) {
 function doLogin() {
 	showUserLogin.value = true;
 }
-async function handleLoginSuccess() {
+async function handleLoginSuccess(auth: AccountAuth) {
+	if (disposed || auth.token !== getAccountToken()) return;
 	showUserLogin.value = false;
 	showLoginMode.value = false;
-	await loadAccount();
+	await loadAccount(false, auth);
 }
 
 async function enterRealm(serverId: string) {

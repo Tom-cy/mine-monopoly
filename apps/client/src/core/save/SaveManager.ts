@@ -83,7 +83,11 @@ export class SaveManager {
 		playerNames: string[],
 	): Promise<SaveRecord> {
 		const existingRecords = await this.storage.listByMap(mapId, mapVersion);
-		const latest = existingRecords.length > 0 ? existingRecords[existingRecords.length - 1] : null;
+		// IndexedDB 按随机主键返回记录，最新存档须以保存时间确定。
+		const latest = existingRecords.reduce<SaveRecord | null>(
+			(current, record) => (!current || record.saveTime > current.saveTime ? record : current),
+			null,
+		);
 		const userIds = Object.keys(snapshot.playerSnapshots);
 
 		const record: SaveRecord = {

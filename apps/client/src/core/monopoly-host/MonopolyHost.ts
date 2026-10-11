@@ -39,6 +39,7 @@ const ADMISSION_OPERATIONS = new Set<OperateType>([
 function isAdmissionControl(message: ClientSocketMessage): boolean {
 	return (
 		message.type === SocketMsgType.Heart ||
+		message.type === SocketMsgType.LeaveRoom ||
 		message.type === SocketMsgType.MapLocalCheck ||
 		message.type === SocketMsgType.MapTransferRequest ||
 		(message.type === SocketMsgType.Operation &&
@@ -203,8 +204,9 @@ export class MonopolyHost {
 				this.room.sendToClient(conn, SocketMsgType.JoinRoom, { roomId: this.room.getRoomId() });
 				void this.room
 					.handleUserReconnect(roleId, conn, version)
-					.then(() => {
-						finishJoin();
+					.then((accepted) => {
+						if (!accepted && isCurrent()) reject("恢复游戏连接失败，请重新入房");
+						else if (accepted) finishJoin();
 					})
 					.catch(() => reject("恢复游戏连接失败"));
 			} else {

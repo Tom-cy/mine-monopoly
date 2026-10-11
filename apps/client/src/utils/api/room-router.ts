@@ -156,18 +156,19 @@ function path(roomId: string, action: string): string {
 	if (!/^[1-9][0-9]*$/.test(roomId)) throw new Error("无效的房间资源 ID");
 	return "/rooms/" + encodeURIComponent(roomId) + "/" + action;
 }
-export async function joinRoomApi(request: RoomJoinRequest): Promise<RoomAdmission> {
+export async function joinRoomApi(request: RoomJoinRequest, isCurrent?: () => boolean): Promise<RoomAdmission> {
 	const context = captureRealm();
 	const response = await apiClient.post<RoomAdmission>("/rooms/join", request, realmConfig(context));
-	return acceptAdmission(response.data, context);
+	return acceptAdmission(response.data, context, isCurrent);
 }
-export async function matchRoomApi(request: { requestId: string; peerId: string }): Promise<RoomAdmission> {
+export async function matchRoomApi(request: { requestId: string; peerId: string }, isCurrent?: () => boolean): Promise<RoomAdmission> {
 	const context = captureRealm();
 	const response = await apiClient.post<RoomAdmission>("/rooms/match", request, realmConfig(context));
-	return acceptAdmission(response.data, context);
+	return acceptAdmission(response.data, context, isCurrent);
 }
-async function acceptAdmission(admission: RoomAdmission, context: RealmRequestContext): Promise<RoomAdmission> {
+async function acceptAdmission(admission: RoomAdmission, context: RealmRequestContext, isCurrent?: () => boolean): Promise<RoomAdmission> {
 	try {
+		if (isCurrent && !isCurrent()) throw Object.assign(new Error("入房已取消"), { staleIdentity: true });
 		assertCurrentRealm(context);
 		rememberRoomAdmission(admission, context.realmSessionId);
 		return admission;
@@ -209,15 +210,22 @@ async function sendCapturedExit(
 	context: RealmRequestContext,
 	keepalive: boolean,
 ): Promise<void> {
-	const response = await fetch(__MONOPOLYSERVER__.replace(/\/$/, "") + path(roomId, action), {
-		method: "POST",
-		keepalive,
-		headers: { Authorization: "Bearer " + context.token, "Content-Type": "application/json" },
-		body: body ? JSON.stringify(body) : undefined,
-	});
-	if (!response.ok) throw new Error("离房请求失败 (" + response.status + ")");
-	const result = (await response.json()) as { code: number; msg?: string };
-	if (result.code !== 200) throw new Error(result.msg || "离房请求失败");
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), 15_000);
+	try {
+		const response = await fetch(__MONOPOLYSERVER__.replace(/\/$/, "") + path(roomId, action), {
+			method: "POST",
+			keepalive,
+			signal: controller.signal,
+			headers: { Authorization: "Bearer " + context.token, "Content-Type": "application/json" },
+			body: body ? JSON.stringify(body) : undefined,
+		});
+		if (!response.ok) throw new Error("离房请求失败 (" + response.status + ")");
+		const result = (await response.json()) as { code: number; msg?: string };
+		if (result.code !== 200) throw new Error(result.msg || "离房请求失败");
+	} finally {
+		clearTimeout(timeout);
+	}
 }
 async function exitRequest(
 	roomId: string,
@@ -240,6 +248,18 @@ export function deleteRoom(roomId: string, lease?: HostLeaseRequest, keepalive =
 }
 export function leaveRoom(roomId: string, keepalive = false): Promise<void> {
 	return exitRequest(roomId, "leave", undefined, keepalive);
+}
+/** 完成准入后、Peer 建立前离开页面的最后一次补偿。 */
+export async function releaseCancelledAdmission(admission: RoomAdmission): Promise<void> {
+	const room = admission.room;
+	if (!room || getRegisteredRoom(room.id)?.roomSessionId !== room.roomSessionId) return;
+	try {
+		if (admission.needCreate && admission.hostLeaseToken) {
+			await deleteRoom(room.id, { hostLeaseToken: admission.hostLeaseToken, hostEpoch: room.hostEpoch });
+		} else await leaveRoom(room.id);
+	} catch {
+		// 请求触发的过期清理负责网络故障后的最终回收。
+	}
 }
 export async function getRoomSessionStatus(roomId: string): Promise<RoomVO> {
 	const context = captureRealm(roomId);

@@ -11,7 +11,7 @@ import type { AccountAuth } from "./types";
 import { resolveAccountProfile } from "./resources";
 export { getAccountInfo as getUserInfo } from "./user";
 
-export async function apiLogin(useraccount: string, password: string, signal?: AbortSignal): Promise<string | null> {
+export async function apiLogin(useraccount: string, password: string, signal?: AbortSignal): Promise<AccountAuth | null> {
 	const generation = getSessionGeneration();
 	try {
 		const response = await apiClient.post<AccountAuth>(
@@ -20,9 +20,10 @@ export async function apiLogin(useraccount: string, password: string, signal?: A
 			{ identity: "none", signal },
 		);
 		if (signal?.aborted || getSessionGeneration() !== generation) return null;
-		saveAccountSession({ ...response.data, account: resolveAccountProfile(response.data.account) });
+		const auth = { ...response.data, account: resolveAccountProfile(response.data.account) };
+		saveAccountSession(auth);
 		startTokenRefreshTimer();
-		return response.data.token;
+		return auth;
 	} catch (error) {
 		if (!signal?.aborted && !(error instanceof MonopolyApiError))
 			FPMessage({ type: "error", message: "登录服务返回的数据无效，请稍后再试" });

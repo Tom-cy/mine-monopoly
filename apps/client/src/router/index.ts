@@ -1,6 +1,7 @@
 import { createRouter, createWebHashHistory, createWebHistory } from "vue-router";
-import { useLoading, useRoomInfo, useUserInfo } from "@src/store";
-import { destoryMonopolyClient } from "@src/core/monopoly-client/MonopolyClient";
+import { useLoading, useRoomInfo, useUserInfo, useChat, useGameLog } from "@src/store";
+import { useGameData } from "@src/store/game";
+import { MonopolyClient, destoryMonopolyClient } from "@src/core/monopoly-client/MonopolyClient";
 import { getAccountProfile, getActiveRealm } from "@src/utils/auth/session";
 import { useLocalParty } from "@src/store/local-party";
 
@@ -36,10 +37,16 @@ const router = createRouter({
 	routes,
 });
 
-router.beforeEach((to, form) => {
+router.beforeEach(async (to) => {
+	if (to.name !== "room" && to.name !== "game") {
+		await destoryMonopolyClient();
+		useRoomInfo().$reset();
+		useGameData().$reset();
+		useChat().$reset();
+		useGameLog().$reset();
+	}
 	switch (to.name) {
 		case "room-router":
-			destoryMonopolyClient();
 			// The lobby also offers local play; only REALM credentials enable its online actions.
 			if (useUserInfo().identityType !== "LOCAL") {
 				const realm = getActiveRealm();
@@ -53,7 +60,7 @@ router.beforeEach((to, form) => {
 			if (!useLocalParty().isActive && !getActiveRealm()) {
 				return { name: "login", query: getAccountProfile() ? { selectRealm: "1" } : {} };
 			}
-			if (!useRoomInfo().roomId && !useLocalParty().isActive) {
+			if (!MonopolyClient.getInstance()?.hasRoomSession() || (!useRoomInfo().roomId && !useLocalParty().isActive)) {
 				return { name: "room-router" };
 			}
 			break;

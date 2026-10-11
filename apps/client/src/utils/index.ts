@@ -337,7 +337,7 @@ export function remToPx(rem: number) {
 }
 
 export function compileTsToJs(code: string, types: string): string {
-	types = types.replaceAll("declare", "");
+	// 保留 ambient 声明，由 TypeScript 擦除；运行时枚举由 Worker 统一注入。
 	const fullCode = `${types}\n${code}`;
 
 	// 编译选项，可以根据需求进行调整

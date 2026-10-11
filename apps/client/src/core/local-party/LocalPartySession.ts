@@ -15,6 +15,7 @@ import type { SaveRecord } from "@src/core/save";
 import { useLocalParty } from "@src/store/local-party";
 import { useUserInfo } from "@src/store";
 import { useMapData } from "@src/store/game";
+import { MAP_LOAD_TIMEOUT_MS } from "@src/utils/file/map-loading";
 
 const MAX_PLAYERS = 6;
 const BROADCAST_TYPES = new Set<SocketMsgType>([
@@ -177,6 +178,7 @@ export class LocalPartySession {
 	}
 	public async changeGameMap(mapInfo: RoomMapInfo): Promise<{ success: boolean; error?: string }> {
 		const mapLoad = this.waitForMapLoad();
+		void mapLoad.catch(() => undefined);
 		try {
 			await this.room.changeMap(mapInfo);
 			await mapLoad;
@@ -276,7 +278,7 @@ export class LocalPartySession {
 		return new Promise((resolve, reject) => {
 			const timer = window.setTimeout(() => {
 				this.rejectPendingMapLoad(new Error("地图资源加载超时"));
-			}, 65_000);
+			}, MAP_LOAD_TIMEOUT_MS);
 			this.pendingMapLoad = { resolve, reject, timer };
 		});
 	}
@@ -311,6 +313,10 @@ export class LocalPartySession {
 			return;
 		}
 		if (operateType === OperateType.MapResourceLoaded) {
+			if (extra?.initStatus === "failed") {
+				this.rejectPendingMapLoad(new Error(extra.reason || "地图资源加载失败"));
+				return;
+			}
 			this.getHumanIds().forEach((playerId) => this.room.handleMapResourceLoaded(playerId, extra?.mapLoadSessionId, extra));
 			this.resolvePendingMapLoad();
 			return;

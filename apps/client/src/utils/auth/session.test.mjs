@@ -365,6 +365,20 @@ test("closing the login form cancels a delayed successful response without savin
 	assert.equal(h.messages.length, 0);
 });
 
+test("a fresh login returns the validated stored account response without fetching account/me", async () => {
+	const paths = [];
+	const login = fixture().account;
+	const h = harness(async (config) => {
+		paths.push(config.url);
+		return { data: { code: 200, data: login }, status: 200, config };
+	});
+	const result = await h.auth.apiLogin("player", "test-password");
+	assert.deepEqual(paths, ["/auth/login"]);
+	assert.equal(result, h.session.getAccountSession());
+	assert.equal(result.account, login.account);
+	assert.equal(result.token, login.token);
+});
+
 test("a delayed login cannot replace a newer login", async () => {
 	let release;
 	const h = harness(
